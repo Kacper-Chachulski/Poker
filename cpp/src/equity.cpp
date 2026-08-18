@@ -5,80 +5,24 @@
 #include <cstdint>
 #include <initializer_list>
 #include <random>
-#include <stdexcept>
 
 #include "poker/evaluator.hpp"
+#include "equity_common.hpp"
+#include "poker/exact_equity.hpp"
 
 namespace poker {
 
 namespace {
 
-constexpr std::size_t kDeckSize = 52U;
-constexpr std::size_t kMaxKnownCards = 7U;
-constexpr std::size_t kMaxOpponents = 5U;
-
-std::array<Card, kDeckSize> make_full_deck() noexcept {
-    std::array<Card, kDeckSize> deck{};
-    for (std::uint8_t index = 0; index < kDeckSize; ++index) {
+std::array<Card, detail::kDeckSize> make_full_deck() noexcept {
+    std::array<Card, detail::kDeckSize> deck{};
+    for (std::uint8_t index = 0; index < detail::kDeckSize; ++index) {
         deck[index] = Card::from_index(index);
     }
     return deck;
 }
 
-bool is_valid_board_size(std::size_t board_count) noexcept {
-    return board_count == 0U || board_count == 3U || board_count == 4U || board_count == 5U;
-}
-
-void throw_invalid(const char* message) {
-    throw std::invalid_argument(message);
-}
-
-void validate_hero_hand(const HoldemHand& hero) {
-    if (!hero.hole[0].valid() || !hero.hole[1].valid()) {
-        throw_invalid("Hero must contain exactly 2 valid cards");
-    }
-
-    if (hero.hole[0] == hero.hole[1]) {
-        throw_invalid("Hero cards must be unique");
-    }
-
-    if (!is_valid_board_size(hero.board_count)) {
-        throw_invalid("Board must contain 0, 3, 4, or 5 cards");
-    }
-
-    for (std::size_t index = 0; index < hero.board_count; ++index) {
-        if (!hero.board[index].valid()) {
-            throw_invalid("Board contains an invalid card");
-        }
-    }
-
-    std::array<Card, kMaxKnownCards> known_cards{};
-    known_cards[0] = hero.hole[0];
-    known_cards[1] = hero.hole[1];
-    for (std::size_t index = 0; index < hero.board_count; ++index) {
-        known_cards[2U + index] = hero.board[index];
-    }
-
-    for (std::size_t left = 0; left < 2U + hero.board_count; ++left) {
-        for (std::size_t right = left + 1U; right < 2U + hero.board_count; ++right) {
-            if (known_cards[left] == known_cards[right]) {
-                throw_invalid("Duplicate cards are not allowed");
-            }
-        }
-    }
-}
-
-void validate_simulation_parameters(std::size_t opponents, std::size_t simulations) {
-    if (opponents < 1U || opponents > kMaxOpponents) {
-        throw_invalid("Opponents must be between 1 and 5");
-    }
-
-    if (simulations == 0U) {
-        throw_invalid("Simulations must be greater than 0");
-    }
-}
-
-std::size_t collect_known_cards(const HoldemHand& hero, std::array<Card, kMaxKnownCards>& known_cards) {
+std::size_t collect_known_cards(const HoldemHand& hero, std::array<Card, detail::kMaxKnownCards>& known_cards) {
     std::size_t count = 0U;
     known_cards[count++] = hero.hole[0];
     known_cards[count++] = hero.hole[1];
@@ -97,7 +41,7 @@ std::size_t collect_known_cards(const HoldemHand& hero, std::array<Card, kMaxKno
     return count;
 }
 
-Card draw_card(std::array<Card, kDeckSize>& deck, std::size_t& remaining, std::mt19937_64& rng) {
+Card draw_card(std::array<Card, detail::kDeckSize>& deck, std::size_t& remaining, std::mt19937_64& rng) {
     std::uniform_int_distribution<std::size_t> distribution(0U, remaining - 1U);
     const std::size_t index = distribution(rng);
     const Card drawn = deck[index];
@@ -108,16 +52,34 @@ Card draw_card(std::array<Card, kDeckSize>& deck, std::size_t& remaining, std::m
 
 }  // namespace
 
+EquityResult calculate_equity(const HoldemHand& hero, std::size_t opponents, const EquityOptions& options) {
+    detail::validate_equity_request(hero, opponents);
+
+    switch (options.method) {
+        case EquityMethod::exact:
+            return solve_exact_equity(hero, opponents);
+        case EquityMethod::monte_carlo:
+            detail::validate_simulations(options.simulations);
+            return simulate_equity(hero,
+                                   opponents,
+                                   static_cast<std::size_t>(options.simulations),
+                                   options.seed.value_or(0U));
+    }
+
+    detail::throw_invalid("Unknown equity calculation method");
+    return {};
+}
+
 EquityResult simulate_equity(const HoldemHand& hero,
                              std::size_t opponents,
                              std::size_t simulations,
                              std::uint64_t seed) {
-    validate_hero_hand(hero);
-    validate_simulation_parameters(opponents, simulations);
+    detail::validate_equity_request(hero, opponents);
+    detail::validate_simulations(simulations);
 
-    std::array<Card, kMaxKnownCards> known_cards{};
+    std::array<Card, detail::kMaxKnownCards> known_cards{};
     const std::size_t known_count = collect_known_cards(hero, known_cards);
-    const std::array<Card, kDeckSize> full_deck = make_full_deck();
+    const std::array<Card, detail::kDeckSize> full_deck = make_full_deck();
     std::mt19937_64 rng(seed);
 
     std::uint64_t win_count = 0U;
@@ -130,10 +92,10 @@ EquityResult simulate_equity(const HoldemHand& hero,
     std::array<Card, 7U> opponent_cards{};
 
     for (std::size_t simulation = 0; simulation < simulations; ++simulation) {
-        std::array<Card, kDeckSize> deck{};
+        std::array<Card, detail::kDeckSize> deck{};
         std::size_t remaining = 0U;
 
-        for (std::size_t index = 0U; index < kDeckSize; ++index) {
+        for (std::size_t index = 0U; index < detail::kDeckSize; ++index) {
             const Card card = full_deck[index];
 
             bool is_known = false;

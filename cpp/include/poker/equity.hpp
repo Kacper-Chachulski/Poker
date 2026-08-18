@@ -2,10 +2,22 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 
 #include "poker/hand.hpp"
 
 namespace poker {
+
+enum class EquityMethod {
+    exact,
+    monte_carlo,
+};
+
+struct EquityOptions {
+    EquityMethod method{EquityMethod::exact};
+    std::uint64_t simulations{0U};
+    std::optional<std::uint64_t> seed{};
+};
 
 struct EquityResult {
     double win_probability{0.0};
@@ -15,6 +27,10 @@ struct EquityResult {
     std::uint64_t simulations{0};
     std::uint64_t evaluated_states{0};
 };
+
+EquityResult calculate_equity(const HoldemHand& hero,
+                              std::size_t opponents,
+                              const EquityOptions& options = {});
 
 EquityResult simulate_equity(const HoldemHand& hero,
                              std::size_t opponents,

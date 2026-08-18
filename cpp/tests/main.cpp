@@ -12,10 +12,10 @@
 
 #include "poker/card.hpp"
 #include "poker/deck.hpp"
-#include "poker/equity.hpp"
-#include "poker/exact_equity.hpp"
 #include "poker/evaluator.hpp"
 #include "poker/hand.hpp"
+#include "poker/equity.hpp"
+#include "poker/range.hpp"
 
 namespace {
 
@@ -233,56 +233,138 @@ void test_evaluator() {
     expect_category(best_five_of_seven, poker::HandCategory::straight_flush, "best 5 of 7 should be selected");
 }
 
+void test_range_basics() {
+    expect_eq(poker::HandRange::parse("AA").size(), 6U, "AA should expand to 6 combos");
+    expect_eq(poker::HandRange::parse("AKs").size(), 4U, "AKs should expand to 4 combos");
+    expect_eq(poker::HandRange::parse("AKo").size(), 12U, "AKo should expand to 12 combos");
+    expect_eq(poker::HandRange::parse("AK").size(), 16U, "AK should expand to 16 combos");
+    expect_eq(poker::HandRange::parse("22").size(), 6U, "22 should expand to 6 combos");
+    expect_eq(poker::HandRange::parse("QJs").size(), 4U, "QJs should expand to 4 combos");
+
+    const poker::HandRange qq_plus = poker::HandRange::parse("QQ+");
+    expect_eq(qq_plus.size(), 18U, "QQ+ should expand to 18 combos");
+
+    const poker::HandRange pairs_plus = poker::HandRange::parse("22+");
+    expect_eq(pairs_plus.size(), 78U, "22+ should expand to 78 combos");
+
+    const poker::HandRange suited_plus = poker::HandRange::parse("A5s+");
+    expect_eq(suited_plus.size(), 36U, "A5s+ should expand to 36 combos");
+
+    expect_eq(poker::HandRange::parse("QQ+, AKs").size(), 22U, "union should deduplicate and count correctly");
+    expect_eq(poker::HandRange::parse("AKs, AKo").size(), 16U, "AKs and AKo should cover AK");
+    expect_eq(poker::HandRange::parse("AKs, AK").size(), 16U, "AKs and AK should cover AK");
+    expect_eq(poker::HandRange::parse("QQ, QQ+").size(), 18U, "overlapping pocket pair ranges should deduplicate");
+    expect_eq(poker::HandRange::parse(" QQ+ , AKs , KQo ").size(), 34U, "whitespace should be ignored around union tokens");
+}
+
+void test_range_membership() {
+    const poker::HandRange ak_suited = poker::HandRange::parse("AKs");
+    expect_true(ak_suited.contains(poker::HandCombo(card("As"), card("Ks"))), "AsKs should belong to AKs");
+    expect_true(ak_suited.contains(poker::HandCombo(card("Ks"), card("As"))), "canonical ordering should not matter");
+    expect_true(!ak_suited.contains(poker::HandCombo(card("As"), card("Kd"))), "AsKd should not belong to AKs");
+
+    const poker::HandRange ak_offsuit = poker::HandRange::parse("AKo");
+    expect_true(ak_offsuit.contains(poker::HandCombo(card("Ah"), card("Kd"))), "AhKd should belong to AKo");
+
+    const poker::HandRange ak_any = poker::HandRange::parse("AK");
+    expect_true(ak_any.contains(poker::HandCombo(card("As"), card("Kh"))), "AsKh should belong to AK");
+
+    const poker::HandRange aa = poker::HandRange::parse("AA");
+    expect_true(aa.contains(poker::HandCombo(card("As"), card("Ah"))), "AsAh should belong to AA");
+}
+
+void test_handcombo_canonicalization() {
+    const poker::HandCombo combo_a(card("As"), card("Ks"));
+    const poker::HandCombo combo_b(card("Ks"), card("As"));
+    expect_true(combo_a == combo_b, "AsKs and KsAs should be treated as identical");
+}
+
+void test_range_invalid_syntax() {
+    const std::array<std::string_view, 12> invalid_inputs{
+        "AX",
+        "AQsX",
+        "AKo+",
+        "QQ-",
+        "A2x",
+        ",AKs",
+        "AKs,",
+        "ZZ",
+        "1As",
+        "2A",
+        "AKx",
+        "",
+    };
+
+    for (std::string_view notation : invalid_inputs) {
+        expect_invalid_argument([&] {
+            (void)poker::HandRange::parse(notation);
+        }, std::string("invalid range notation should throw: ") + std::string(notation));
+    }
+
+    expect_invalid_argument([&] {
+        (void)poker::HandRange::parse("AKs,,QQ");
+    }, "empty token in the middle should throw");
+}
+
+[[maybe_unused]] poker::EquityOptions exact_options() {
+    poker::EquityOptions options{};
+    options.method = poker::EquityMethod::exact;
+    return options;
+}
+
+[[maybe_unused]] poker::EquityOptions monte_carlo_options(std::uint64_t simulations, std::uint64_t seed) {
+    poker::EquityOptions options{};
+    options.method = poker::EquityMethod::monte_carlo;
+    options.simulations = simulations;
+    options.seed = seed;
+    return options;
+}
+
 void test_equity_validation() {
     expect_no_throw([&] {
-        (void)poker::simulate_equity(make_hand("As", "Ks"), 1U, 1U, 123U);
+        (void)poker::calculate_equity(make_hand("As", "Ks"), 0U, exact_options());
     }, "pre-flop should be valid");
 
     expect_no_throw([&] {
-        (void)poker::simulate_equity(make_hand("As", "Ks", {"Qh", "7c", "2s"}), 1U, 1U, 123U);
+        (void)poker::calculate_equity(make_hand("As", "Ks", {"Qh", "7c", "2s"}), 1U, exact_options());
     }, "flop should be valid");
 
     expect_no_throw([&] {
-        (void)poker::simulate_equity(make_hand("As", "Ks", {"Qh", "7c", "2s", "Td"}), 1U, 1U, 123U);
+        (void)poker::calculate_equity(make_hand("As", "Ks", {"Qh", "7c", "2s", "Td"}), 1U, exact_options());
     }, "turn should be valid");
 
     expect_no_throw([&] {
-        (void)poker::simulate_equity(make_hand("As", "Ks", {"Qh", "7c", "2s", "Td", "4h"}), 1U, 1U, 123U);
+        (void)poker::calculate_equity(make_hand("As", "Ks", {"Qh", "7c", "2s", "Td", "4h"}), 1U, exact_options());
     }, "river should be valid");
 
     poker::HoldemHand invalid_board_1 = make_hand("As", "Ks", {"Qh"});
     expect_invalid_argument([&] {
-        (void)poker::simulate_equity(invalid_board_1, 1U, 1U, 123U);
+        (void)poker::calculate_equity(invalid_board_1, 1U, exact_options());
     }, "board size 1 should be rejected");
 
     poker::HoldemHand invalid_board_2 = make_hand("As", "Ks", {"Qh", "7c"});
     expect_invalid_argument([&] {
-        (void)poker::simulate_equity(invalid_board_2, 1U, 1U, 123U);
+        (void)poker::calculate_equity(invalid_board_2, 1U, exact_options());
     }, "board size 2 should be rejected");
 
     expect_invalid_argument([&] {
-        (void)poker::simulate_equity(make_hand("As", "Ks"), 0U, 1U, 123U);
-    }, "zero opponents should be rejected");
-
-    expect_invalid_argument([&] {
-        (void)poker::simulate_equity(make_hand("As", "Ks"), 6U, 1U, 123U);
-    }, "six opponents should be rejected");
-
-    expect_invalid_argument([&] {
-        (void)poker::simulate_equity(make_hand("As", "As"), 1U, 1U, 123U);
+        (void)poker::calculate_equity(make_hand("As", "As"), 1U, exact_options());
     }, "duplicate hero cards should be rejected");
 
     expect_invalid_argument([&] {
-        (void)poker::simulate_equity(make_hand("As", "Ks", {"As", "7c", "2s"}), 1U, 1U, 123U);
+        (void)poker::calculate_equity(make_hand("As", "Ks", {"As", "7c", "2s"}), 1U, exact_options());
     }, "duplicate hero and board cards should be rejected");
 
     expect_invalid_argument([&] {
-        (void)poker::simulate_equity(make_hand("As", "Ks"), 1U, 0U, 123U);
+        poker::EquityOptions options{};
+        options.method = poker::EquityMethod::monte_carlo;
+        options.simulations = 0U;
+        (void)poker::calculate_equity(make_hand("As", "Ks"), 1U, options);
     }, "zero simulations should be rejected");
 }
 
 void test_equity_correctness() {
-    const poker::EquityResult preflop = poker::simulate_equity(make_hand("As", "Ks"), 2U, 200U, 12345U);
+    const poker::EquityResult preflop = poker::calculate_equity(make_hand("As", "Ks"), 2U, monte_carlo_options(200U, 12345U));
     expect_true(preflop.win_probability >= 0.0 && preflop.win_probability <= 1.0, "win probability should be in range");
     expect_true(preflop.tie_probability >= 0.0 && preflop.tie_probability <= 1.0, "tie probability should be in range");
     expect_true(preflop.loss_probability >= 0.0 && preflop.loss_probability <= 1.0, "loss probability should be in range");
@@ -293,16 +375,16 @@ void test_equity_correctness() {
     expect_true(preflop.equity <= preflop.win_probability + preflop.tie_probability,
                 "equity should not exceed win + tie probability");
 
-    const poker::EquityResult same_seed_a = poker::simulate_equity(make_hand("As", "Ks"), 2U, 100U, 424242U);
-    const poker::EquityResult same_seed_b = poker::simulate_equity(make_hand("As", "Ks"), 2U, 100U, 424242U);
+    const poker::EquityResult same_seed_a = poker::calculate_equity(make_hand("As", "Ks"), 2U, monte_carlo_options(100U, 424242U));
+    const poker::EquityResult same_seed_b = poker::calculate_equity(make_hand("As", "Ks"), 2U, monte_carlo_options(100U, 424242U));
     expect_true(same_seed_a.win_probability == same_seed_b.win_probability &&
                 same_seed_a.tie_probability == same_seed_b.tie_probability &&
                 same_seed_a.loss_probability == same_seed_b.loss_probability &&
                 same_seed_a.equity == same_seed_b.equity,
                 "same seed should produce identical results");
 
-    const poker::EquityResult different_seed_a = poker::simulate_equity(make_hand("As", "Ks"), 2U, 200U, 1U);
-    const poker::EquityResult different_seed_b = poker::simulate_equity(make_hand("As", "Ks"), 2U, 200U, 2U);
+    const poker::EquityResult different_seed_a = poker::calculate_equity(make_hand("As", "Ks"), 2U, monte_carlo_options(200U, 1U));
+    const poker::EquityResult different_seed_b = poker::calculate_equity(make_hand("As", "Ks"), 2U, monte_carlo_options(200U, 2U));
     const bool any_difference = different_seed_a.win_probability != different_seed_b.win_probability ||
                                 different_seed_a.tie_probability != different_seed_b.tie_probability ||
                                 different_seed_a.loss_probability != different_seed_b.loss_probability ||
@@ -311,15 +393,15 @@ void test_equity_correctness() {
 }
 
 void test_equity_sanity() {
-    const poker::EquityResult strong_hand = poker::simulate_equity(
-        make_hand("As", "Ah", {"Ac", "Kd", "Kh", "Qh", "2s"}), 2U, 300U, 77U);
+    const poker::EquityResult strong_hand = poker::calculate_equity(
+        make_hand("As", "Ah", {"Ac", "Kd", "Kh", "Qh", "2s"}), 2U, monte_carlo_options(300U, 77U));
     expect_true(strong_hand.equity > 0.85, "strong made hand on the river should have high equity");
 
-    const poker::EquityResult weak_hand = poker::simulate_equity(make_hand("7d", "2c"), 5U, 300U, 88U);
+    const poker::EquityResult weak_hand = poker::calculate_equity(make_hand("7d", "2c"), 5U, monte_carlo_options(300U, 88U));
     expect_true(weak_hand.equity < 0.25, "very weak hand against many opponents should have low equity");
 
-    const poker::EquityResult board_tie = poker::simulate_equity(
-        make_hand("2d", "3c", {"Ah", "Kh", "Qh", "Jh", "Th"}), 2U, 50U, 99U);
+    const poker::EquityResult board_tie = poker::calculate_equity(
+        make_hand("2d", "3c", {"Ah", "Kh", "Qh", "Jh", "Th"}), 2U, monte_carlo_options(50U, 99U));
     expect_close(board_tie.win_probability, 0.0, 1e-12, "board tie should have no wins");
     expect_close(board_tie.loss_probability, 0.0, 1e-12, "board tie should have no losses");
     expect_close(board_tie.tie_probability, 1.0, 1e-12, "board tie should have all ties");
@@ -328,46 +410,42 @@ void test_equity_sanity() {
 
 void test_exact_validation() {
     expect_no_throw([&] {
-        (void)poker::solve_exact_equity(make_hand("As", "Ks", {"Qh", "7c", "2s"}), 1U);
+        (void)poker::calculate_equity(make_hand("As", "Ks", {"Qh", "7c", "2s"}), 1U, exact_options());
     }, "flop exact should be valid");
 
     expect_no_throw([&] {
-        (void)poker::solve_exact_equity(make_hand("As", "Ks", {"Qh", "7c", "2s", "Td"}), 1U);
+        (void)poker::calculate_equity(make_hand("As", "Ks", {"Qh", "7c", "2s", "Td"}), 1U, exact_options());
     }, "turn exact should be valid");
 
     expect_no_throw([&] {
-        (void)poker::solve_exact_equity(make_hand("As", "Ks", {"Qh", "7c", "2s", "Td", "4h"}), 1U);
+        (void)poker::calculate_equity(make_hand("As", "Ks", {"Qh", "7c", "2s", "Td", "4h"}), 1U, exact_options());
     }, "river exact should be valid");
 
     expect_invalid_argument([&] {
-        (void)poker::solve_exact_equity(make_hand("As", "Ks", {"Qh"}), 1U);
+        (void)poker::calculate_equity(make_hand("As", "Ks", {"Qh"}), 1U, exact_options());
     }, "exact solver should reject board size 1");
 
     expect_invalid_argument([&] {
-        (void)poker::solve_exact_equity(make_hand("As", "Ks", {"Qh", "7c"}), 1U);
+        (void)poker::calculate_equity(make_hand("As", "Ks", {"Qh", "7c"}), 1U, exact_options());
     }, "exact solver should reject board size 2");
 
     expect_invalid_argument([&] {
-        (void)poker::solve_exact_equity(make_hand("As", "Ks"), 0U);
-    }, "exact solver should reject zero opponents");
-
-    expect_invalid_argument([&] {
-        (void)poker::solve_exact_equity(make_hand("As", "Ks"), 6U);
+        (void)poker::calculate_equity(make_hand("As", "Ks"), 6U, exact_options());
     }, "exact solver should reject six opponents");
 }
 
 void test_exact_correctness() {
-    const poker::EquityResult river = poker::solve_exact_equity(make_hand("As", "Ks", {"Qh", "7c", "2s", "Td", "4h"}), 1U);
+    const poker::EquityResult river = poker::calculate_equity(make_hand("As", "Ks", {"Qh", "7c", "2s", "Td", "4h"}), 1U, exact_options());
     expect_eq(river.evaluated_states, theoretical_exact_states(5U, 1U), "river exact state count");
     expect_close(river.win_probability + river.tie_probability + river.loss_probability, 1.0, 1e-12,
                  "river exact probabilities should sum to 1");
 
-    const poker::EquityResult turn = poker::solve_exact_equity(make_hand("As", "Ks", {"Qh", "7c", "2s", "Td"}), 1U);
+    const poker::EquityResult turn = poker::calculate_equity(make_hand("As", "Ks", {"Qh", "7c", "2s", "Td"}), 1U, exact_options());
     expect_eq(turn.evaluated_states, theoretical_exact_states(4U, 1U), "turn exact state count");
     expect_close(turn.win_probability + turn.tie_probability + turn.loss_probability, 1.0, 1e-12,
                  "turn exact probabilities should sum to 1");
 
-    const poker::EquityResult flop = poker::solve_exact_equity(make_hand("As", "Ks", {"Qh", "7c", "2s"}), 1U);
+    const poker::EquityResult flop = poker::calculate_equity(make_hand("As", "Ks", {"Qh", "7c", "2s"}), 1U, exact_options());
     expect_eq(flop.evaluated_states, theoretical_exact_states(3U, 1U), "flop exact state count");
     expect_close(flop.win_probability + flop.tie_probability + flop.loss_probability, 1.0, 1e-12,
                  "flop exact probabilities should sum to 1");
@@ -375,12 +453,24 @@ void test_exact_correctness() {
     expect_true(river.equity >= 0.0 && river.equity <= 1.0, "river exact equity range");
     expect_true(turn.equity >= 0.0 && turn.equity <= 1.0, "turn exact equity range");
     expect_true(flop.equity >= 0.0 && flop.equity <= 1.0, "flop exact equity range");
+
+    const poker::EquityResult exact_tie = poker::calculate_equity(make_hand("2d", "3c", {"Ah", "Kh", "Qh", "Jh", "Th"}), 1U, exact_options());
+    expect_close(exact_tie.win_probability, 0.0, 1e-12, "exact tie should have no wins");
+    expect_close(exact_tie.loss_probability, 0.0, 1e-12, "exact tie should have no losses");
+    expect_close(exact_tie.tie_probability, 1.0, 1e-12, "exact tie should have all ties");
+    expect_close(exact_tie.equity, 0.5, 1e-12, "exact tie should split equity evenly");
+
+    const poker::EquityResult zero_opponents = poker::calculate_equity(make_hand("As", "Ks", {"Qh", "7c", "2s"}), 0U, exact_options());
+    expect_close(zero_opponents.win_probability, 1.0, 1e-12, "zero opponents should always win");
+    expect_close(zero_opponents.tie_probability, 0.0, 1e-12, "zero opponents should have no ties");
+    expect_close(zero_opponents.loss_probability, 0.0, 1e-12, "zero opponents should have no losses");
+    expect_close(zero_opponents.equity, 1.0, 1e-12, "zero opponents should have full equity");
 }
 
 void test_exact_monte_carlo_cross_validation() {
     const poker::HoldemHand river_hand = make_hand("As", "Ks", {"Qh", "7c", "2s", "Td", "4h"});
-    const poker::EquityResult exact = poker::solve_exact_equity(river_hand, 1U);
-    const poker::EquityResult monte_carlo = poker::simulate_equity(river_hand, 1U, 50000U, 20240601U);
+    const poker::EquityResult exact = poker::calculate_equity(river_hand, 1U, exact_options());
+    const poker::EquityResult monte_carlo = poker::calculate_equity(river_hand, 1U, monte_carlo_options(50000U, 20240601U));
     expect_true(std::fabs(exact.equity - monte_carlo.equity) < 0.05,
                 "Monte Carlo should converge toward the exact river result");
 }
@@ -393,6 +483,10 @@ int main() {
         test_deck();
         test_holdem_representation();
         test_evaluator();
+        test_range_basics();
+        test_range_membership();
+        test_handcombo_canonicalization();
+        test_range_invalid_syntax();
         test_equity_validation();
         test_equity_correctness();
         test_equity_sanity();

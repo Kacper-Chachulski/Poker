@@ -9,8 +9,8 @@
 #include <string_view>
 
 #include "poker/card.hpp"
-#include "poker/exact_equity.hpp"
 #include "poker/hand.hpp"
+#include "poker/equity.hpp"
 
 namespace {
 
@@ -118,7 +118,8 @@ std::string format_board(const poker::HoldemHand& hand) {
 void run_scenario(const Scenario& scenario) {
     const std::uint64_t theoretical = theoretical_states(scenario.hero.board_count, scenario.opponents);
     const auto start = std::chrono::steady_clock::now();
-    const poker::EquityResult result = poker::solve_exact_equity(scenario.hero, scenario.opponents);
+    const poker::EquityOptions options{};
+    const poker::EquityResult result = poker::calculate_equity(scenario.hero, scenario.opponents, options);
     const auto end = std::chrono::steady_clock::now();
     const std::chrono::duration<double> elapsed = end - start;
     const double states_per_second = static_cast<double>(result.evaluated_states) / elapsed.count();

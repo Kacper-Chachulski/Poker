@@ -29,6 +29,7 @@ add_library(poker_core
     src/equity.cpp
     src/evaluator.cpp
     src/hand.cpp
+    src/range.cpp
 )
 
 target_compile_features(poker_core PRIVATE cxx_std_17)

@@ -4,29 +4,20 @@
 #include <iomanip>
 #include <iostream>
 #include <optional>
-#include <random>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 
 #include "poker/card.hpp"
 #include "poker/equity.hpp"
-#include "poker/exact_equity.hpp"
 #include "poker/hand.hpp"
 
 namespace {
 
-enum class Method {
-    monte_carlo,
-    exact,
-};
-
 struct CliOptions {
     poker::HoldemHand hero;
     std::size_t opponents{0U};
-    std::size_t simulations{0U};
-    std::optional<std::uint64_t> seed;
-    Method method{Method::monte_carlo};
+    poker::EquityOptions equity_options{};
 };
 
 bool starts_with_option(std::string_view token) {
@@ -49,12 +40,12 @@ std::uint64_t parse_u64(std::string_view text, const char* label) {
     }
 }
 
-Method parse_method(std::string_view text) {
+poker::EquityMethod parse_method(std::string_view text) {
     if (text == "exact") {
-        return Method::exact;
+        return poker::EquityMethod::exact;
     }
     if (text == "montecarlo") {
-        return Method::monte_carlo;
+        return poker::EquityMethod::monte_carlo;
     }
     throw std::invalid_argument(std::string("Invalid method: ") + std::string(text));
 }
@@ -102,7 +93,7 @@ CliOptions parse_equity_arguments(int argc, char* argv[]) {
             if (index + 1U >= static_cast<std::size_t>(argc)) {
                 throw std::invalid_argument("--simulations requires a value");
             }
-            options.simulations = static_cast<std::size_t>(parse_u64(argv[index + 1U], "simulations"));
+            options.equity_options.simulations = parse_u64(argv[index + 1U], "simulations");
             index += 2U;
             continue;
         }
@@ -111,7 +102,7 @@ CliOptions parse_equity_arguments(int argc, char* argv[]) {
             if (index + 1U >= static_cast<std::size_t>(argc)) {
                 throw std::invalid_argument("--seed requires a value");
             }
-            options.seed = parse_u64(argv[index + 1U], "seed");
+            options.equity_options.seed = parse_u64(argv[index + 1U], "seed");
             index += 2U;
             continue;
         }
@@ -120,7 +111,7 @@ CliOptions parse_equity_arguments(int argc, char* argv[]) {
             if (index + 1U >= static_cast<std::size_t>(argc)) {
                 throw std::invalid_argument("--method requires a value");
             }
-            options.method = parse_method(argv[index + 1U]);
+            options.equity_options.method = parse_method(argv[index + 1U]);
             index += 2U;
             continue;
         }
@@ -136,16 +127,12 @@ CliOptions parse_equity_arguments(int argc, char* argv[]) {
         ++index;
     }
 
-    if (options.opponents == 0U || options.opponents > 5U) {
-        throw std::invalid_argument("--opponents must be between 1 and 5");
+    if (options.opponents > 5U) {
+        throw std::invalid_argument("--opponents must be between 0 and 5");
     }
 
-    if (options.hero.board_count != 0U && options.hero.board_count != 3U &&
-        options.hero.board_count != 4U && options.hero.board_count != 5U) {
-        throw std::invalid_argument("Board must contain 0, 3, 4, or 5 cards");
-    }
-
-    if (options.method == Method::monte_carlo && options.simulations == 0U) {
+    if (options.equity_options.method == poker::EquityMethod::monte_carlo &&
+        options.equity_options.simulations == 0U) {
         throw std::invalid_argument("--simulations must be greater than 0 for Monte Carlo mode");
     }
 
@@ -177,17 +164,6 @@ std::string format_board(const poker::HoldemHand& hand) {
         text += hand.board[index].to_string();
     }
     return text;
-}
-
-std::uint64_t choose_seed(const std::optional<std::uint64_t>& provided_seed) {
-    if (provided_seed.has_value()) {
-        return *provided_seed;
-    }
-
-    std::random_device device;
-    const std::uint64_t high = static_cast<std::uint64_t>(device()) << 32U;
-    const std::uint64_t low = static_cast<std::uint64_t>(device());
-    return high ^ low;
 }
 
 void print_monte_carlo_result(const CliOptions& options, const poker::EquityResult& result, std::uint64_t seed, double seconds) {
@@ -234,16 +210,16 @@ void print_exact_result(const CliOptions& options, const poker::EquityResult& re
 int main(int argc, char* argv[]) {
     try {
         const CliOptions options = parse_equity_arguments(argc, argv);
-        const std::uint64_t seed = choose_seed(options.seed);
 
         const auto start = std::chrono::steady_clock::now();
-        if (options.method == Method::exact) {
-            const poker::EquityResult result = poker::solve_exact_equity(options.hero, options.opponents);
+        if (options.equity_options.method == poker::EquityMethod::exact) {
+            const poker::EquityResult result = poker::calculate_equity(options.hero, options.opponents, options.equity_options);
             const auto end = std::chrono::steady_clock::now();
             const std::chrono::duration<double> elapsed = end - start;
             print_exact_result(options, result, elapsed.count());
         } else {
-            const poker::EquityResult result = poker::simulate_equity(options.hero, options.opponents, options.simulations, seed);
+            const std::uint64_t seed = options.equity_options.seed.value_or(0U);
+            const poker::EquityResult result = poker::calculate_equity(options.hero, options.opponents, options.equity_options);
             const auto end = std::chrono::steady_clock::now();
             const std::chrono::duration<double> elapsed = end - start;
             print_monte_carlo_result(options, result, seed, elapsed.count());

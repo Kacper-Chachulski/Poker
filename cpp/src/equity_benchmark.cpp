@@ -10,8 +10,8 @@
 #include <string>
 
 #include "poker/card.hpp"
-#include "poker/equity.hpp"
 #include "poker/hand.hpp"
+#include "poker/equity.hpp"
 
 namespace {
 
@@ -95,7 +95,11 @@ std::string format_board(const poker::HoldemHand& hand) {
 
 void run_scenario(const Scenario& scenario, std::uint64_t simulations, std::uint64_t seed) {
     const auto start = std::chrono::steady_clock::now();
-    const poker::EquityResult result = poker::simulate_equity(scenario.hero, scenario.opponents, simulations, seed);
+    poker::EquityOptions options{};
+    options.method = poker::EquityMethod::monte_carlo;
+    options.simulations = simulations;
+    options.seed = seed;
+    const poker::EquityResult result = poker::calculate_equity(scenario.hero, scenario.opponents, options);
     const auto end = std::chrono::steady_clock::now();
     const std::chrono::duration<double> elapsed = end - start;
     const double sims_per_second = static_cast<double>(simulations) / elapsed.count();

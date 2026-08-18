@@ -7,13 +7,11 @@
 #include <utility>
 
 #include "poker/evaluator.hpp"
+#include "equity_common.hpp"
 
 namespace poker {
 
 namespace {
-
-constexpr std::size_t kDeckSize = 52U;
-constexpr std::size_t kMaxOpponents = 5U;
 
 struct Counts {
     std::uint64_t wins{0U};
@@ -23,51 +21,15 @@ struct Counts {
     std::uint64_t states{0U};
 };
 
-[[noreturn]] void invalid(const char* message) {
-    throw std::invalid_argument(message);
-}
-
-bool valid_board_size(std::size_t board_count) noexcept {
-    return board_count == 0U || board_count == 3U || board_count == 4U || board_count == 5U;
-}
-
-void validate_inputs(const HoldemHand& hero, std::size_t opponents) {
-    if (!hero.hole[0].valid() || !hero.hole[1].valid()) {
-        invalid("Hero must contain exactly 2 valid cards");
-    }
-
-    if (hero.hole[0] == hero.hole[1]) {
-        invalid("Hero cards must be unique");
-    }
-
-    if (!valid_board_size(hero.board_count)) {
-        invalid("Board must contain 0, 3, 4, or 5 cards");
-    }
-
-    if (opponents < 1U || opponents > kMaxOpponents) {
-        invalid("Opponents must be between 1 and 5");
-    }
-
-    for (std::size_t left = 0; left < 2U + hero.board_count; ++left) {
-        for (std::size_t right = left + 1U; right < 2U + hero.board_count; ++right) {
-            const Card left_card = (left < 2U) ? hero.hole[left] : hero.board[left - 2U];
-            const Card right_card = (right < 2U) ? hero.hole[right] : hero.board[right - 2U];
-            if (left_card == right_card) {
-                invalid("Duplicate cards are not allowed");
-            }
-        }
-    }
-}
-
-std::array<Card, kDeckSize> make_full_deck() noexcept {
-    std::array<Card, kDeckSize> deck{};
-    for (std::uint8_t index = 0; index < kDeckSize; ++index) {
+std::array<Card, detail::kDeckSize> make_full_deck() noexcept {
+    std::array<Card, detail::kDeckSize> deck{};
+    for (std::uint8_t index = 0; index < detail::kDeckSize; ++index) {
         deck[index] = Card::from_index(index);
     }
     return deck;
 }
 
-void remove_card(std::array<Card, kDeckSize>& deck, std::size_t& deck_count, Card card) {
+void remove_card(std::array<Card, detail::kDeckSize>& deck, std::size_t& deck_count, Card card) {
     for (std::size_t index = 0; index < deck_count; ++index) {
         if (deck[index] == card) {
             deck[index] = deck[deck_count - 1U];
@@ -75,12 +37,12 @@ void remove_card(std::array<Card, kDeckSize>& deck, std::size_t& deck_count, Car
             return;
         }
     }
-    invalid("Known card not found in deck");
+    detail::throw_invalid("Known card not found in deck");
 }
 
 void evaluate_leaf(const HoldemHand& hero,
                    const std::array<Card, 5>& board,
-                   const std::array<std::array<Card, 2>, kMaxOpponents>& opponent_holes,
+                   const std::array<std::array<Card, 2>, detail::kMaxOpponents>& opponent_holes,
                    std::size_t opponents,
                    Counts& counts) {
     std::array<Card, 7> hero_cards{};
@@ -128,12 +90,12 @@ void evaluate_leaf(const HoldemHand& hero,
     ++counts.states;
 }
 
-void enumerate_opponents(std::array<Card, kDeckSize>& deck,
+void enumerate_opponents(std::array<Card, detail::kDeckSize>& deck,
                          std::size_t deck_count,
                          std::size_t opponent_index,
                          std::size_t opponents,
                          const std::array<Card, 5>& board,
-                         std::array<std::array<Card, 2>, kMaxOpponents>& opponent_holes,
+                         std::array<std::array<Card, 2>, detail::kMaxOpponents>& opponent_holes,
                          Counts& counts,
                          const HoldemHand& hero) {
     if (opponent_index == opponents) {
@@ -172,7 +134,7 @@ void enumerate_opponents(std::array<Card, kDeckSize>& deck,
     }
 }
 
-void enumerate_board(std::array<Card, kDeckSize>& deck,
+void enumerate_board(std::array<Card, detail::kDeckSize>& deck,
                      std::size_t deck_count,
                      std::size_t board_known,
                      std::size_t board_filled,
@@ -180,7 +142,7 @@ void enumerate_board(std::array<Card, kDeckSize>& deck,
                      std::size_t start_index,
                      std::size_t opponents,
                      std::array<Card, 5>& board,
-                     std::array<std::array<Card, 2>, kMaxOpponents>& opponent_holes,
+                     std::array<std::array<Card, 2>, detail::kMaxOpponents>& opponent_holes,
                      Counts& counts,
                      const HoldemHand& hero) {
     if (missing_board == 0U) {
@@ -244,10 +206,10 @@ std::uint64_t theoretical_states(std::size_t hero_board_count, std::size_t oppon
 }  // namespace
 
 EquityResult solve_exact_equity(const HoldemHand& hero, std::size_t opponents) {
-    validate_inputs(hero, opponents);
+    detail::validate_equity_request(hero, opponents);
 
-    std::array<Card, kDeckSize> deck = make_full_deck();
-    std::size_t deck_count = kDeckSize;
+    std::array<Card, detail::kDeckSize> deck = make_full_deck();
+    std::size_t deck_count = detail::kDeckSize;
     remove_card(deck, deck_count, hero.hole[0]);
     remove_card(deck, deck_count, hero.hole[1]);
 
@@ -257,7 +219,7 @@ EquityResult solve_exact_equity(const HoldemHand& hero, std::size_t opponents) {
         remove_card(deck, deck_count, hero.board[index]);
     }
 
-    std::array<std::array<Card, 2>, kMaxOpponents> opponent_holes{};
+    std::array<std::array<Card, 2>, detail::kMaxOpponents> opponent_holes{};
     Counts counts{};
 
     enumerate_board(deck,
