@@ -3,8 +3,10 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <vector>
 
 #include "poker/hand.hpp"
+#include "poker/range.hpp"
 
 namespace poker {
 
@@ -30,6 +32,15 @@ struct EquityResult {
 
 EquityResult calculate_equity(const HoldemHand& hero,
                               std::size_t opponents,
+                              const EquityOptions& options = {});
+
+EquityResult calculate_equity(const HoldemHand& hero,
+                              const HandRange& villain_range,
+                              const EquityOptions& options = {});
+
+EquityResult calculate_equity(const HandRange& hero_range,
+                              const HandRange& villain_range,
+                              const std::vector<Card>& board,
                               const EquityOptions& options = {});
 
 EquityResult simulate_equity(const HoldemHand& hero,

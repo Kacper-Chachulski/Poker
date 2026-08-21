@@ -1,17 +1,23 @@
 #include <algorithm>
 #include <array>
+#include <cstdlib>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
+#include <fstream>
 #include <initializer_list>
 #include <iostream>
+#include <iterator>
 #include <optional>
 #include <random>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "poker/card.hpp"
 #include "poker/deck.hpp"
+#include "poker/ev.hpp"
 #include "poker/evaluator.hpp"
 #include "poker/hand.hpp"
 #include "poker/equity.hpp"
@@ -64,6 +70,17 @@ void expect_invalid_argument(Fn&& fn, const std::string& message) {
     }
 }
 
+template <typename Fn>
+bool run_test(const char* name, Fn&& fn) {
+    try {
+        fn();
+        return true;
+    } catch (const std::exception& error) {
+        std::cerr << "Unhandled exception in " << name << ": " << error.what() << '\n';
+        return false;
+    }
+}
+
 poker::Card card(std::string_view text) {
     const std::optional<poker::Card> parsed = poker::Card::from_string(text);
     if (!parsed) {
@@ -84,6 +101,15 @@ poker::HoldemHand make_hand(std::string_view h1,
         hand.board[index++] = card(text);
     }
     return hand;
+}
+
+std::vector<poker::Card> make_board(std::initializer_list<std::string_view> board = {}) {
+    std::vector<poker::Card> cards;
+    cards.reserve(board.size());
+    for (std::string_view text : board) {
+        cards.push_back(card(text));
+    }
+    return cards;
 }
 
 void expect_category(const poker::HandValue value,
@@ -123,6 +149,141 @@ std::uint64_t theoretical_exact_states(std::size_t board_count, std::size_t oppo
 
     return board_states * opponent_states;
 }
+
+std::size_t count_legal_villain_combos(const poker::HoldemHand& hero, const poker::HandRange& villain_range) {
+    std::array<poker::Card, 7> known_cards{};
+    std::size_t known_count = 0U;
+    known_cards[known_count++] = hero.hole[0];
+    known_cards[known_count++] = hero.hole[1];
+    for (std::size_t index = 0U; index < hero.board_count; ++index) {
+        known_cards[known_count++] = hero.board[index];
+    }
+
+    std::size_t legal_count = 0U;
+    for (const poker::HandCombo& combo : villain_range) {
+        const std::array<poker::Card, 2> cards = combo.cards();
+        bool blocked = false;
+        for (std::size_t index = 0U; index < known_count; ++index) {
+            if (cards[0] == known_cards[index] || cards[1] == known_cards[index]) {
+                blocked = true;
+                break;
+            }
+        }
+
+        if (!blocked) {
+            ++legal_count;
+        }
+    }
+
+    return legal_count;
+}
+
+std::uint64_t theoretical_range_exact_states(std::size_t board_count, std::size_t legal_combo_count) {
+    return legal_combo_count * binomial(48U - board_count, 5U - board_count);
+}
+
+std::size_t count_legal_combos_after_board(const poker::HandRange& range, const std::vector<poker::Card>& board) {
+    std::size_t legal_count = 0U;
+    for (const poker::HandCombo& combo : range) {
+        const std::array<poker::Card, 2> cards = combo.cards();
+        bool blocked = false;
+        for (poker::Card board_card : board) {
+            if (cards[0] == board_card || cards[1] == board_card) {
+                blocked = true;
+                break;
+            }
+        }
+
+        if (!blocked) {
+            ++legal_count;
+        }
+    }
+
+    return legal_count;
+}
+
+std::size_t count_legal_pairs_after_board(const poker::HandRange& hero_range,
+                                          const poker::HandRange& villain_range,
+                                          const std::vector<poker::Card>& board) {
+    std::size_t pair_count = 0U;
+    for (const poker::HandCombo& hero_combo : hero_range) {
+        const std::array<poker::Card, 2> hero_cards = hero_combo.cards();
+        bool hero_blocked = false;
+        for (poker::Card board_card : board) {
+            if (hero_cards[0] == board_card || hero_cards[1] == board_card) {
+                hero_blocked = true;
+                break;
+            }
+        }
+        if (hero_blocked) {
+            continue;
+        }
+
+        for (const poker::HandCombo& villain_combo : villain_range) {
+            const std::array<poker::Card, 2> villain_cards = villain_combo.cards();
+            bool blocked = false;
+            for (poker::Card board_card : board) {
+                if (villain_cards[0] == board_card || villain_cards[1] == board_card ||
+                    hero_cards[0] == board_card || hero_cards[1] == board_card) {
+                    blocked = true;
+                    break;
+                }
+            }
+
+            if (blocked) {
+                continue;
+            }
+
+            if (hero_cards[0] == villain_cards[0] || hero_cards[0] == villain_cards[1] ||
+                hero_cards[1] == villain_cards[0] || hero_cards[1] == villain_cards[1]) {
+                continue;
+            }
+
+            ++pair_count;
+        }
+    }
+
+    return pair_count;
+}
+
+struct CliRunResult {
+    int exit_code{0};
+    std::string output{};
+};
+
+CliRunResult run_cli_command(const std::string& command) {
+    const std::string output_path = "cli_test_output.txt";
+    const std::string full_command = command + " > " + output_path + " 2>&1";
+    const int exit_code = std::system(full_command.c_str());
+
+    std::ifstream file(output_path, std::ios::binary);
+    const std::string output((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    std::remove(output_path.c_str());
+
+    return {exit_code, output};
+}
+
+void expect_cli_success(const std::string& command, std::initializer_list<std::string_view> snippets) {
+    const CliRunResult result = run_cli_command(command);
+    expect_eq(static_cast<std::uint64_t>(result.exit_code), 0U, std::string("CLI command should succeed: ") + command);
+    for (std::string_view snippet : snippets) {
+        expect_true(result.output.find(snippet) != std::string::npos,
+                    std::string("CLI output should contain '") + std::string(snippet) + "': " + command);
+    }
+}
+
+void expect_cli_failure(const std::string& command, std::initializer_list<std::string_view> snippets) {
+    const CliRunResult result = run_cli_command(command);
+    expect_true(result.exit_code != 0, std::string("CLI command should fail: ") + command);
+    for (std::string_view snippet : snippets) {
+        expect_true(result.output.find(snippet) != std::string::npos,
+                    std::string("CLI error output should contain '") + std::string(snippet) + "': " + command);
+    }
+}
+
+[[maybe_unused]] poker::EquityOptions exact_options();
+
+[[maybe_unused]] poker::EquityOptions monte_carlo_options(std::uint64_t simulations, std::uint64_t seed);
 
 void test_cards() {
     std::array<bool, 52> seen{};
@@ -306,6 +467,333 @@ void test_range_invalid_syntax() {
     }, "empty token in the middle should throw");
 }
 
+void test_range_equity_smoke_and_card_removal() {
+    const poker::HoldemHand hero = make_hand("As", "Ks", {"Qd", "Jc", "Th", "9s", "2c"});
+    const poker::HandRange villain_range = poker::HandRange::parse("AK");
+
+    const poker::EquityResult result = poker::calculate_equity(hero, villain_range, exact_options());
+    expect_eq(result.evaluated_states, 9U, "AK should shrink to 9 legal combos after removing hero cards");
+    expect_close(result.win_probability, 0.0, 1e-12, "hero should not win against tied AK combos on the river");
+    expect_close(result.tie_probability, 1.0, 1e-12, "all legal AK combos should tie on this board");
+    expect_close(result.loss_probability, 0.0, 1e-12, "hero should not lose against tied AK combos on the river");
+    expect_close(result.equity, 0.5, 1e-12, "tied heads-up river result should split equity evenly");
+}
+
+void test_range_exact_river_equity() {
+    const poker::HoldemHand hero = make_hand("As", "Ks", {"Qd", "Jc", "Th", "9s", "2c"});
+    const poker::HandRange villain_range = poker::HandRange::parse("AA, KK, QQ, AK");
+
+    const std::size_t legal_combo_count = count_legal_villain_combos(hero, villain_range);
+    const poker::EquityResult result = poker::calculate_equity(hero, villain_range, exact_options());
+
+    expect_eq(legal_combo_count, 18U, "river range should shrink to 18 legal combos");
+    expect_eq(result.evaluated_states, theoretical_range_exact_states(hero.board_count, legal_combo_count),
+              "river exact range state count should match legal combos times one showdown each");
+    expect_close(result.win_probability, 9.0 / 18.0, 1e-12, "river win probability should be exact");
+    expect_close(result.tie_probability, 9.0 / 18.0, 1e-12, "river tie probability should be exact");
+    expect_close(result.loss_probability, 0.0, 1e-12, "river loss probability should be exact");
+    expect_close(result.equity, 13.5 / 18.0, 1e-12, "river equity should average wins and half-ties");
+}
+
+void test_range_exact_flop_and_turn_equity() {
+    const poker::HandRange villain_range = poker::HandRange::parse("AA, KK, QQ, AK");
+
+    const poker::HoldemHand flop = make_hand("As", "Ks", {"Qs", "Js", "Ts"});
+    const std::size_t flop_legal_count = count_legal_villain_combos(flop, villain_range);
+    const poker::EquityResult flop_result = poker::calculate_equity(flop, villain_range, exact_options());
+    expect_eq(flop_legal_count, 18U, "flop should leave 18 legal villain combos");
+    expect_eq(flop_result.evaluated_states, theoretical_range_exact_states(flop.board_count, flop_legal_count),
+              "flop exact state count should include every legal combo and board runout");
+    expect_close(flop_result.win_probability, 1.0, 1e-12, "royal flush on the flop should always win");
+    expect_close(flop_result.tie_probability, 0.0, 1e-12, "royal flush on the flop should never tie");
+    expect_close(flop_result.loss_probability, 0.0, 1e-12, "royal flush on the flop should never lose");
+    expect_close(flop_result.equity, 1.0, 1e-12, "royal flush on the flop should have full equity");
+
+    const poker::HoldemHand turn = make_hand("As", "Ks", {"Qs", "Js", "Ts", "2d"});
+    const std::size_t turn_legal_count = count_legal_villain_combos(turn, villain_range);
+    const poker::EquityResult turn_result = poker::calculate_equity(turn, villain_range, exact_options());
+    expect_eq(turn_legal_count, 18U, "turn should leave 18 legal villain combos");
+    expect_eq(turn_result.evaluated_states, theoretical_range_exact_states(turn.board_count, turn_legal_count),
+              "turn exact state count should include every legal combo and river card");
+    expect_close(turn_result.win_probability, 1.0, 1e-12, "royal flush on the turn should always win");
+    expect_close(turn_result.tie_probability, 0.0, 1e-12, "royal flush on the turn should never tie");
+    expect_close(turn_result.loss_probability, 0.0, 1e-12, "royal flush on the turn should never lose");
+    expect_close(turn_result.equity, 1.0, 1e-12, "royal flush on the turn should have full equity");
+}
+
+void test_range_monte_carlo_cross_validation() {
+    const poker::HoldemHand hero = make_hand("As", "Ks", {"Qd", "Jc", "Th", "9s", "2c"});
+    const poker::HandRange villain_range = poker::HandRange::parse("AA, KK, QQ, AK");
+
+    poker::EquityOptions exact = exact_options();
+    poker::EquityOptions monte = monte_carlo_options(50000U, 20240818U);
+
+    const poker::EquityResult exact_result = poker::calculate_equity(hero, villain_range, exact);
+    const poker::EquityResult monte_result = poker::calculate_equity(hero, villain_range, monte);
+
+    expect_true(std::fabs(exact_result.equity - monte_result.equity) < 0.02,
+                "Monte Carlo range equity should converge toward the exact river result");
+}
+
+void test_range_monte_carlo_determinism() {
+    const poker::HoldemHand hero = make_hand("As", "Ks", {"Qd", "Jc", "Th", "9s", "2c"});
+    const poker::HandRange villain_range = poker::HandRange::parse("AA, KK, QQ, AK");
+
+    const poker::EquityResult first = poker::calculate_equity(hero, villain_range, monte_carlo_options(2000U, 424242U));
+    const poker::EquityResult second = poker::calculate_equity(hero, villain_range, monte_carlo_options(2000U, 424242U));
+
+    expect_true(first.win_probability == second.win_probability &&
+                first.tie_probability == second.tie_probability &&
+                first.loss_probability == second.loss_probability &&
+                first.equity == second.equity,
+                "same seed should produce identical range Monte Carlo results");
+}
+
+void test_range_empty_after_card_removal() {
+    const poker::HoldemHand hero = make_hand("As", "Ah", {"Ad", "Ac", "Qh"});
+    const poker::HandRange villain_range = poker::HandRange::parse("AK");
+
+    expect_invalid_argument([&] {
+        (void)poker::calculate_equity(hero, villain_range, exact_options());
+    }, "range should throw when every combo is removed by known cards");
+}
+
+void test_range_vs_range_river_manual() {
+    const poker::HandRange hero_range = poker::HandRange::parse("AA");
+    const poker::HandRange villain_range = poker::HandRange::parse("KK");
+    const std::vector<poker::Card> board = make_board({"Ah", "Kd", "Qs", "Jc", "Td"});
+
+    const poker::EquityResult result = poker::calculate_equity(hero_range, villain_range, board, exact_options());
+    expect_eq(result.evaluated_states, 9U, "AA vs KK river should evaluate the remaining legal concrete pairs");
+    expect_close(result.win_probability, 0.0, 1e-12, "board straight should force a tie");
+    expect_close(result.tie_probability, 1.0, 1e-12, "board straight should force a tie");
+    expect_close(result.loss_probability, 0.0, 1e-12, "board straight should force a tie");
+    expect_close(result.equity, 0.5, 1e-12, "board straight should split equity");
+}
+
+void test_range_vs_range_aa_kk_exact() {
+    const poker::HandRange hero_range = poker::HandRange::parse("AA");
+    const poker::HandRange villain_range = poker::HandRange::parse("KK");
+    const std::vector<poker::Card> board = make_board({"Qh", "Jd", "Tc", "8s", "7d"});
+
+    const poker::EquityResult result = poker::calculate_equity(hero_range, villain_range, board, exact_options());
+    expect_eq(result.evaluated_states, 36U, "AA vs KK river should evaluate all legal concrete pairs");
+    expect_close(result.win_probability, 1.0, 1e-12, "AA should beat KK on this river board");
+    expect_close(result.tie_probability, 0.0, 1e-12, "AA vs KK should not tie on this board");
+    expect_close(result.loss_probability, 0.0, 1e-12, "AA vs KK should not lose on this board");
+    expect_close(result.equity, 1.0, 1e-12, "AA should have full equity against KK here");
+}
+
+void test_range_vs_range_ak_overlap_removal() {
+    const poker::HandRange hero_range = poker::HandRange::parse("AK");
+    const poker::HandRange villain_range = poker::HandRange::parse("AK");
+    const std::vector<poker::Card> board = make_board({"Qh", "Jd", "9c", "7s", "2d"});
+
+    const std::size_t legal_hero_combos = count_legal_combos_after_board(hero_range, board);
+    const std::size_t legal_pairs = count_legal_pairs_after_board(hero_range, villain_range, board);
+    const poker::EquityResult result = poker::calculate_equity(hero_range, villain_range, board, exact_options());
+
+    expect_eq(legal_hero_combos, 16U, "AK should leave 16 legal hero combos on this board");
+    expect_eq(legal_pairs, 144U, "AK vs AK should only evaluate non-overlapping ordered pairs");
+    expect_eq(result.evaluated_states, 144U, "evaluated states should match the legal ordered pair count on the river");
+}
+
+void test_range_vs_range_flop_turn_exact() {
+    const poker::HandRange hero_range = poker::HandRange::parse("AA");
+    const poker::HandRange villain_range = poker::HandRange::parse("KK");
+
+    const poker::EquityResult flop = poker::calculate_equity(hero_range, villain_range, make_board({"Qh", "Jd", "Tc"}), exact_options());
+    expect_eq(flop.evaluated_states, 35640U, "flop exact range-vs-range state count should match legal pairs and board runouts");
+    expect_close(flop.win_probability + flop.tie_probability + flop.loss_probability, 1.0, 1e-12,
+                 "flop exact probabilities should sum to 1");
+
+    const poker::EquityResult turn = poker::calculate_equity(hero_range, villain_range, make_board({"Qh", "Jd", "Tc", "9s"}), exact_options());
+    expect_eq(turn.evaluated_states, 1584U, "turn exact range-vs-range state count should match legal pairs and river runouts");
+    expect_close(turn.win_probability + turn.tie_probability + turn.loss_probability, 1.0, 1e-12,
+                 "turn exact probabilities should sum to 1");
+}
+
+void test_range_vs_range_monte_carlo_cross_validation() {
+    const poker::HandRange hero_range = poker::HandRange::parse("AA, KK");
+    const poker::HandRange villain_range = poker::HandRange::parse("QQ, JJ");
+    const std::vector<poker::Card> board = make_board({"Qh", "Jd", "Tc", "9s", "2d"});
+
+    const poker::EquityResult exact = poker::calculate_equity(hero_range, villain_range, board, exact_options());
+    const poker::EquityResult monte = poker::calculate_equity(hero_range, villain_range, board, monte_carlo_options(20000U, 20260818U));
+
+    expect_true(std::fabs(exact.equity - monte.equity) < 0.03,
+                "range-vs-range Monte Carlo should converge toward exact equity");
+}
+
+void test_range_vs_range_monte_carlo_determinism() {
+    const poker::HandRange hero_range = poker::HandRange::parse("AA, KK");
+    const poker::HandRange villain_range = poker::HandRange::parse("QQ, JJ");
+    const std::vector<poker::Card> board = make_board({"Qh", "Jd", "Tc", "9s", "2d"});
+
+    const poker::EquityResult first = poker::calculate_equity(hero_range, villain_range, board, monte_carlo_options(5000U, 424242U));
+    const poker::EquityResult second = poker::calculate_equity(hero_range, villain_range, board, monte_carlo_options(5000U, 424242U));
+
+    expect_true(first.win_probability == second.win_probability &&
+                first.tie_probability == second.tie_probability &&
+                first.loss_probability == second.loss_probability &&
+                first.equity == second.equity,
+                "same seed should produce identical range-vs-range Monte Carlo results");
+}
+
+void test_range_vs_range_validation() {
+    const poker::HandRange hero_range = poker::HandRange::parse("AK");
+    const poker::HandRange villain_range = poker::HandRange::parse("AK");
+
+    expect_invalid_argument([&] {
+        (void)poker::calculate_equity(poker::HandRange{}, villain_range, make_board(), exact_options());
+    }, "empty hero range should be rejected");
+
+    expect_invalid_argument([&] {
+        (void)poker::calculate_equity(hero_range, poker::HandRange{}, make_board(), exact_options());
+    }, "empty villain range should be rejected");
+
+    expect_invalid_argument([&] {
+        (void)poker::calculate_equity(poker::HandRange::parse("AA"), villain_range, make_board({"As", "Ah", "Ad", "Ac"}), exact_options());
+    }, "fully blocked hero range should be rejected");
+
+    expect_invalid_argument([&] {
+        (void)poker::calculate_equity(poker::HandRange::parse("AA"), villain_range, make_board({"Ks", "Kh", "Kd", "Kc"}), exact_options());
+    }, "fully blocked villain range should be rejected");
+}
+
+void test_ev_calculations() {
+    const poker::PotOddsResult odds_100_50 = poker::calculate_pot_odds(100.0, 50.0);
+    expect_close(odds_100_50.pot_before_call, 100.0, 1e-12, "pot should round-trip");
+    expect_close(odds_100_50.call_amount, 50.0, 1e-12, "call amount should round-trip");
+    expect_close(odds_100_50.final_pot, 150.0, 1e-12, "final pot should add the call");
+    expect_close(odds_100_50.required_equity, 1.0 / 3.0, 1e-12, "required equity should be call / (pot + call)");
+    expect_true(odds_100_50.pot_odds_ratio.has_value(), "pot odds ratio should be present for non-zero calls");
+    expect_close(*odds_100_50.pot_odds_ratio, 2.0, 1e-12, "pot odds ratio should be pot / call");
+
+    const poker::PotOddsResult odds_100_100 = poker::calculate_pot_odds(100.0, 100.0);
+    expect_close(odds_100_100.required_equity, 0.5, 1e-12, "break-even equity should be 50% when pot equals call");
+    expect_close(*odds_100_100.pot_odds_ratio, 1.0, 1e-12, "pot odds ratio should be 1:1 when pot equals call");
+
+    const poker::PotOddsResult odds_200_50 = poker::calculate_pot_odds(200.0, 50.0);
+    expect_close(odds_200_50.final_pot, 250.0, 1e-12, "final pot should be 250");
+    expect_close(odds_200_50.required_equity, 0.2, 1e-12, "required equity should be 20%");
+    expect_close(*odds_200_50.pot_odds_ratio, 4.0, 1e-12, "pot odds ratio should be 4:1");
+
+    expect_close(poker::calculate_break_even_equity(100.0, 50.0), 1.0 / 3.0, 1e-12, "break-even equity should match pot odds");
+    expect_close(poker::calculate_call_ev(1.0 / 3.0, 100.0, 50.0), 0.0, 1e-12, "break-even equity should produce zero call EV");
+    expect_close(poker::calculate_call_ev(0.40, 100.0, 50.0), 10.0, 1e-12, "40% equity against 100/50 should be +10");
+    expect_close(poker::calculate_call_ev(0.30, 100.0, 50.0), -5.0, 1e-12, "30% equity against 100/50 should be -5");
+    expect_close(poker::calculate_fold_ev(100.0, 50.0), 0.0, 1e-12, "fold EV should be zero");
+
+    const poker::PotOddsResult zero_call = poker::calculate_pot_odds(100.0, 0.0);
+    expect_close(zero_call.final_pot, 100.0, 1e-12, "zero call should leave the pot unchanged");
+    expect_close(zero_call.required_equity, 0.0, 1e-12, "zero call should have zero break-even equity");
+    expect_true(!zero_call.pot_odds_ratio.has_value(), "zero call should not report a finite pot odds ratio");
+    expect_close(poker::calculate_call_ev(0.40, 100.0, 0.0), 40.0, 1e-12, "zero call should preserve the full equity value");
+
+    expect_invalid_argument([&] {
+        (void)poker::calculate_pot_odds(-1.0, 50.0);
+    }, "negative pot should be rejected");
+
+    expect_invalid_argument([&] {
+        (void)poker::calculate_pot_odds(100.0, -1.0);
+    }, "negative call should be rejected");
+
+    expect_invalid_argument([&] {
+        (void)poker::calculate_call_ev(-0.01, 100.0, 50.0);
+    }, "negative equity should be rejected");
+
+    expect_invalid_argument([&] {
+        (void)poker::calculate_call_ev(1.01, 100.0, 50.0);
+    }, "equity above 1 should be rejected");
+
+    expect_invalid_argument([&] {
+        (void)poker::calculate_call_ev(std::numeric_limits<double>::quiet_NaN(), 100.0, 50.0);
+    }, "NaN equity should be rejected");
+
+    expect_invalid_argument([&] {
+        (void)poker::calculate_pot_odds(std::numeric_limits<double>::infinity(), 50.0);
+    }, "infinite pot should be rejected");
+}
+
+void test_cli_help_and_usage() {
+    expect_cli_success("poker.exe equity --help", {"Usage:", "--hero-range", "--villain-range"});
+    expect_cli_success("poker.exe pot-odds --help", {"Usage:", "pot-odds", "--pot", "--call"});
+    expect_cli_success("poker.exe ev --help", {"Usage:", "poker ev", "--equity"});
+}
+
+void test_cli_specific_hand_vs_range() {
+    expect_cli_success(
+        "poker.exe equity As Ks --villain-range \"QQ+, AJs+, KQs\" --board Qh 7c 2s --method exact",
+        {"Hero: As Ks", "Villain range:", "Method: Exact", "States:"});
+}
+
+void test_cli_range_vs_range() {
+    expect_cli_success(
+        "poker.exe equity --hero-range \"QQ+, AKs\" --villain-range \"JJ+, AQs+\" --board Qh 7c 2s --method montecarlo --simulations 1000 --seed 12345",
+        {"Hero range:", "Villain range:", "Method: Monte Carlo", "Seed: 12345"});
+}
+
+void test_cli_validation_failures() {
+    expect_cli_failure(
+        "poker.exe equity As Ks --villain-range \"AKo+\" --board Qh 7c 2s --method exact",
+        {"Offsuit plus notation is not supported"});
+
+    expect_cli_failure(
+        "poker.exe equity As Ks --villain-range \"\" --board Qh 7c 2s --method exact",
+        {"Range notation is empty"});
+
+    expect_cli_failure(
+        "poker.exe equity As Ks --villain-range \"AK\" --board As 7c 2s --method exact",
+        {"Duplicate cards"});
+
+    expect_cli_failure(
+        "poker.exe equity As Ks --villain-range \"AK\" --board Qh --method exact",
+        {"Board must contain 0, 3, 4, or 5 cards"});
+
+    expect_cli_failure(
+        "poker.exe equity As Ks --hero-range \"AA\" --villain-range \"KK\"",
+        {"Positional hero cards cannot be combined with range arguments"});
+
+    expect_cli_failure(
+        "poker.exe equity --hero-range \"AA\"",
+        {"--hero-range requires --villain-range"});
+
+    expect_cli_failure(
+        "poker.exe equity --villain-range \"AK\"",
+        {"Specific-hand vs range requires exactly two hero cards"});
+
+    expect_cli_failure(
+        "poker.exe equity As Ks --method bogus",
+        {"Invalid method"});
+
+    expect_cli_failure(
+        "poker.exe equity As Ks --method montecarlo --simulations 0",
+        {"--simulations must be greater than 0"});
+
+    expect_cli_failure(
+        "poker.exe pot-odds --pot -1 --call 50",
+        {"Pot before call must be non-negative and finite"});
+
+    expect_cli_failure(
+        "poker.exe ev --pot 100 --call 50 --equity 1.5",
+        {"Equity must be between 0 and 1"});
+}
+
+void test_cli_pot_odds_and_ev() {
+    expect_cli_success(
+        "poker.exe pot-odds --pot 100 --call 50",
+        {"Pot before call: 100", "Call amount:      50", "Final pot:       150", "Required equity: 33.33%", "Pot odds:        2:1"});
+
+    expect_cli_success(
+        "poker.exe ev --pot 100 --call 50 --equity 0.40",
+        {"Equity:          40.00%", "Call EV:         +10.00", "Fold EV:         +0.00", "Decision:        CALL"});
+
+    expect_cli_success(
+        "poker.exe ev --pot 100 --call 50 --equity 0.30",
+        {"Call EV:         -5.00", "Decision:        FOLD"});
+}
+
 [[maybe_unused]] poker::EquityOptions exact_options() {
     poker::EquityOptions options{};
     options.method = poker::EquityMethod::exact;
@@ -478,23 +966,39 @@ void test_exact_monte_carlo_cross_validation() {
 }  // namespace
 
 int main() {
-    try {
-        test_cards();
-        test_deck();
-        test_holdem_representation();
-        test_evaluator();
-        test_range_basics();
-        test_range_membership();
-        test_handcombo_canonicalization();
-        test_range_invalid_syntax();
-        test_equity_validation();
-        test_equity_correctness();
-        test_equity_sanity();
-        test_exact_validation();
-        test_exact_correctness();
-        test_exact_monte_carlo_cross_validation();
-    } catch (const std::exception& error) {
-        std::cerr << "Unhandled exception in tests: " << error.what() << '\n';
+    if (!run_test("test_cards", test_cards) ||
+        !run_test("test_deck", test_deck) ||
+        !run_test("test_holdem_representation", test_holdem_representation) ||
+        !run_test("test_evaluator", test_evaluator) ||
+        !run_test("test_range_basics", test_range_basics) ||
+        !run_test("test_range_membership", test_range_membership) ||
+        !run_test("test_handcombo_canonicalization", test_handcombo_canonicalization) ||
+        !run_test("test_range_invalid_syntax", test_range_invalid_syntax) ||
+        !run_test("test_ev_calculations", test_ev_calculations) ||
+        !run_test("test_range_equity_smoke_and_card_removal", test_range_equity_smoke_and_card_removal) ||
+        !run_test("test_range_vs_range_river_manual", test_range_vs_range_river_manual) ||
+        !run_test("test_range_vs_range_aa_kk_exact", test_range_vs_range_aa_kk_exact) ||
+        !run_test("test_range_vs_range_ak_overlap_removal", test_range_vs_range_ak_overlap_removal) ||
+        !run_test("test_range_vs_range_flop_turn_exact", test_range_vs_range_flop_turn_exact) ||
+        !run_test("test_range_vs_range_monte_carlo_cross_validation", test_range_vs_range_monte_carlo_cross_validation) ||
+        !run_test("test_range_vs_range_monte_carlo_determinism", test_range_vs_range_monte_carlo_determinism) ||
+        !run_test("test_range_vs_range_validation", test_range_vs_range_validation) ||
+        !run_test("test_cli_help_and_usage", test_cli_help_and_usage) ||
+        !run_test("test_cli_specific_hand_vs_range", test_cli_specific_hand_vs_range) ||
+        !run_test("test_cli_range_vs_range", test_cli_range_vs_range) ||
+        !run_test("test_cli_validation_failures", test_cli_validation_failures) ||
+        !run_test("test_cli_pot_odds_and_ev", test_cli_pot_odds_and_ev) ||
+        !run_test("test_range_exact_river_equity", test_range_exact_river_equity) ||
+        !run_test("test_range_exact_flop_and_turn_equity", test_range_exact_flop_and_turn_equity) ||
+        !run_test("test_range_monte_carlo_cross_validation", test_range_monte_carlo_cross_validation) ||
+        !run_test("test_range_monte_carlo_determinism", test_range_monte_carlo_determinism) ||
+        !run_test("test_range_empty_after_card_removal", test_range_empty_after_card_removal) ||
+        !run_test("test_equity_validation", test_equity_validation) ||
+        !run_test("test_equity_correctness", test_equity_correctness) ||
+        !run_test("test_equity_sanity", test_equity_sanity) ||
+        !run_test("test_exact_validation", test_exact_validation) ||
+        !run_test("test_exact_correctness", test_exact_correctness) ||
+        !run_test("test_exact_monte_carlo_cross_validation", test_exact_monte_carlo_cross_validation)) {
         return 1;
     }
 

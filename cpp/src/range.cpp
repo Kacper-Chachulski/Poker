@@ -123,7 +123,7 @@ void add_any_suit_combos(std::bitset<kComboUniverseSize>& membership, Rank high,
 void add_suited_plus(std::bitset<kComboUniverseSize>& membership, Rank high, Rank low) {
     const std::uint8_t high_value = rank_value(high);
     const std::uint8_t low_value = rank_value(low);
-    for (std::uint8_t value = low_value; value <= high_value; ++value) {
+    for (std::uint8_t value = low_value; value < high_value; ++value) {
         add_suited_combos(membership, high, static_cast<Rank>(value));
     }
 }

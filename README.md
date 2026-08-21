@@ -1,6 +1,7 @@
 # Poker Engine
 
-A small foundation for a Texas Hold'em poker engine focused on equity calculation.
+A small foundation for a Texas Hold'em poker engine focused on equity calculation
+and the mathematical decision primitives that sit on top of it.
 The near-term plan is to start with exact enumeration when the game state is small,
 switch to Monte Carlo simulation when the search space becomes too large, and later
 combine both strategies in a hybrid engine. Python will handle orchestration,
@@ -32,6 +33,29 @@ poker/
 ├── README.md
 └── requirements.txt
 ```
+
+## Decision Math
+
+The `poker` C++ library now exposes a small EV layer in `cpp/include/poker/ev.hpp`.
+It is independent from the equity engine and accepts an already-calculated equity
+value.
+
+The pot convention is:
+
+- `pot_before_call` is the amount already in the pot before Hero calls.
+- if Hero calls `X`, the final pot is `pot_before_call + X`.
+- call EV uses the net incremental value of calling, not the total pot size.
+
+Formulas:
+
+```text
+required_equity = call_amount / (pot_before_call + call_amount)
+call_ev = equity * pot_before_call - (1 - equity) * call_amount
+fold_ev = 0
+```
+
+If `call_amount` is `0`, the break-even equity is `0` and the CLI reports pot odds as
+`N/A` because there is no price to pay.
 
 ## Python Environment
 
@@ -74,6 +98,57 @@ cmake --build cpp/build --config Release
 On this machine, validation used the MinGW toolchain installed under
 `C:\Program Files\CodeBlocks\MinGW\bin`. If your compiler is already on PATH,
 the shorter commands above are enough.
+
+## C++ CLI Examples
+
+The `poker` executable now supports specific-hand equity, specific-hand vs range,
+and range vs range through explicit range flags.
+
+Specific hand vs specific hand:
+
+```powershell
+cpp\build\poker.exe equity As Ks --opponents 1 --board Qh 7c 2s --method exact
+```
+
+Specific hand vs range:
+
+```powershell
+cpp\build\poker.exe equity As Ks --villain-range "QQ+, AJs+, KQs" --board Qh 7c 2s --method exact
+```
+
+Range vs range:
+
+```powershell
+cpp\build\poker.exe equity --hero-range "QQ+, AKs" --villain-range "JJ+, AQs+" --board Qh 7c 2s --method montecarlo --simulations 1000000 --seed 12345
+```
+
+Run `cpp\build\poker.exe equity --help` to print the full usage summary.
+
+Pot odds:
+
+```powershell
+cpp\build\poker.exe pot-odds --pot 100 --call 50
+```
+
+EV comparison:
+
+```powershell
+cpp\build\poker.exe ev --pot 100 --call 50 --equity 0.40
+```
+
+Example output:
+
+```text
+Pot before call: 100.00
+Call amount:      50.00
+Final pot:       150.00
+Required equity: 33.33%
+Pot odds:        2.00:1
+Equity:          40.00%
+Call EV:         +10.00
+Fold EV:         +0.00
+Decision:        CALL
+```
 
 ## Run The Benchmarks
 
