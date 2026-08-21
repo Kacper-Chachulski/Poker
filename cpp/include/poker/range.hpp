@@ -50,6 +50,8 @@ public:
 
     HandRange() = default;
 
+    static HandRange from_combo(const HandCombo& combo);
+
     static HandRange parse(std::string_view notation);
 
     std::size_t size() const noexcept;

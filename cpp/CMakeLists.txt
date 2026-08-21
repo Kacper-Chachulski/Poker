@@ -24,9 +24,11 @@ endfunction()
 
 add_library(poker_core
     src/card.cpp
+    src/betting.cpp
     src/deck.cpp
     src/exact_equity.cpp
     src/equity.cpp
+    src/game_state.cpp
     src/evaluator.cpp
     src/ev.cpp
     src/hand.cpp

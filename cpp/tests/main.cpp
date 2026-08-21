@@ -8,6 +8,7 @@
 #include <initializer_list>
 #include <iostream>
 #include <iterator>
+#include <limits>
 #include <optional>
 #include <random>
 #include <stdexcept>
@@ -17,6 +18,7 @@
 
 #include "poker/card.hpp"
 #include "poker/deck.hpp"
+#include "poker/game_state.hpp"
 #include "poker/ev.hpp"
 #include "poker/evaluator.hpp"
 #include "poker/hand.hpp"
@@ -110,6 +112,61 @@ std::vector<poker::Card> make_board(std::initializer_list<std::string_view> boar
         cards.push_back(card(text));
     }
     return cards;
+}
+
+bool contains_action(const std::vector<poker::BettingAction>& actions, poker::BettingAction action) {
+    return std::find(actions.begin(), actions.end(), action) != actions.end();
+}
+
+void expect_actions(const std::vector<poker::BettingAction>& actions,
+                    std::initializer_list<poker::BettingAction> expected,
+                    const std::string& message) {
+    if (actions.size() != expected.size()) {
+        fail(message + " expected size=" + std::to_string(expected.size()) + " actual=" + std::to_string(actions.size()));
+        return;
+    }
+
+    for (poker::BettingAction action : expected) {
+        if (!contains_action(actions, action)) {
+            fail(message + ": missing expected betting action");
+            return;
+        }
+    }
+}
+
+poker::Opponent make_random_opponent() {
+    return poker::RandomOpponent{};
+}
+
+poker::Opponent make_specific_opponent(std::string_view first, std::string_view second) {
+    return poker::HandCombo(card(first), card(second));
+}
+
+poker::Opponent make_range_opponent(std::string_view notation) {
+    return poker::HandRange::parse(notation);
+}
+
+poker::GameState make_game_state(poker::Street street,
+                                 std::string_view hero_first,
+                                 std::string_view hero_second,
+                                 std::initializer_list<std::string_view> board,
+                                 std::initializer_list<poker::Opponent> opponents,
+                                 double pot,
+                                 double call_amount,
+                                 double effective_stack,
+                                 std::optional<double> minimum_raise_amount = std::nullopt,
+                                 bool check_allowed = false) {
+    poker::GameState state{};
+    state.street = street;
+    state.hero = make_hand(hero_first, hero_second, board);
+    state.betting.current_pot = pot;
+    state.betting.call_amount = call_amount;
+    state.betting.hero_stack = effective_stack;
+    state.betting.minimum_raise_amount = minimum_raise_amount;
+    state.betting.check_allowed = check_allowed;
+    state.opponents = opponents;
+    state.player_count = 1U + opponents.size();
+    return state;
 }
 
 void expect_category(const poker::HandValue value,
@@ -465,6 +522,152 @@ void test_range_invalid_syntax() {
     expect_invalid_argument([&] {
         (void)poker::HandRange::parse("AKs,,QQ");
     }, "empty token in the middle should throw");
+}
+
+void test_betting_validation_and_legal_actions() {
+    const poker::BettingState no_bet{100.0, 0.0, 500.0, 10.0, true};
+    expect_no_throw([&] { poker::validate_betting_state(no_bet); }, "no-bet state should be valid");
+    expect_actions(poker::get_legal_actions(no_bet), {poker::BettingAction::check, poker::BettingAction::bet, poker::BettingAction::all_in}, "no-bet legal actions");
+
+    const poker::BettingState facing_bet{100.0, 50.0, 500.0, 50.0, false};
+    expect_no_throw([&] { poker::validate_betting_state(facing_bet); }, "facing-bet state should be valid");
+    expect_actions(poker::get_legal_actions(facing_bet), {poker::BettingAction::fold, poker::BettingAction::call, poker::BettingAction::raise, poker::BettingAction::all_in}, "facing-bet legal actions");
+
+    const poker::BettingState exact_call{100.0, 50.0, 50.0, std::nullopt, false};
+    expect_no_throw([&] { poker::validate_betting_state(exact_call); }, "exact-call state should be valid");
+    expect_actions(poker::get_legal_actions(exact_call), {poker::BettingAction::fold, poker::BettingAction::call}, "exact-call legal actions");
+
+    const poker::BettingState call_but_no_raise{100.0, 50.0, 60.0, std::nullopt, false};
+    expect_no_throw([&] { poker::validate_betting_state(call_but_no_raise); }, "call-but-no-raise state should be valid");
+    expect_actions(poker::get_legal_actions(call_but_no_raise), {poker::BettingAction::fold, poker::BettingAction::call, poker::BettingAction::all_in}, "call-but-no-raise legal actions");
+
+    const poker::BettingState all_in_only{100.0, 0.0, 6.0, 10.0, true};
+    expect_no_throw([&] { poker::validate_betting_state(all_in_only); }, "all-in-only no-bet state should be valid");
+    expect_actions(poker::get_legal_actions(all_in_only), {poker::BettingAction::check, poker::BettingAction::all_in}, "all-in-only legal actions");
+
+    expect_invalid_argument([&] {
+        (void)poker::validate_betting_state(poker::BettingState{100.0, 0.0, -1.0, 10.0, true});
+    }, "negative stack should be rejected");
+
+    expect_invalid_argument([&] {
+        (void)poker::validate_betting_state(poker::BettingState{100.0, -1.0, 500.0, 10.0, true});
+    }, "negative call should be rejected");
+
+    expect_invalid_argument([&] {
+        (void)poker::validate_betting_state(poker::BettingState{100.0, 50.0, 40.0, 10.0, false});
+    }, "call amount greater than stack should be rejected");
+
+    expect_invalid_argument([&] {
+        (void)poker::validate_betting_state(poker::BettingState{100.0, 50.0, 500.0, 0.0, false});
+    }, "minimum raise amount must be positive");
+
+    expect_invalid_argument([&] {
+        (void)poker::validate_betting_state(poker::BettingState{100.0, 50.0, 500.0, 10.0, true});
+    }, "check cannot be allowed when facing a bet");
+
+    expect_invalid_argument([&] {
+        (void)poker::validate_betting_state(poker::BettingState{100.0, 0.0, 500.0, std::nullopt, true});
+    }, "no-bet state with chips should require a betting amount");
+}
+
+void test_game_state_validation() {
+    const poker::GameState preflop = make_game_state(poker::Street::preflop, "As", "Ks", {}, {make_random_opponent()}, 100.0, 50.0, 1000.0);
+    const poker::GameState flop = make_game_state(poker::Street::flop, "As", "Ks", {"Qh", "7c", "2s"}, {make_random_opponent()}, 100.0, 50.0, 1000.0);
+    const poker::GameState turn = make_game_state(poker::Street::turn, "As", "Ks", {"Qh", "7c", "2s", "Td"}, {make_random_opponent()}, 100.0, 50.0, 1000.0);
+    const poker::GameState river = make_game_state(poker::Street::river, "As", "Ks", {"Qh", "7c", "2s", "Td", "4h"}, {make_random_opponent()}, 100.0, 50.0, 1000.0);
+
+    expect_no_throw([&] { poker::validate_game_state(preflop); }, "preflop state should be valid");
+    expect_no_throw([&] { poker::validate_game_state(flop); }, "flop state should be valid");
+    expect_no_throw([&] { poker::validate_game_state(turn); }, "turn state should be valid");
+    expect_no_throw([&] { poker::validate_game_state(river); }, "river state should be valid");
+
+    expect_invalid_argument([&] {
+        (void)poker::validate_game_state(make_game_state(poker::Street::preflop, "As", "Ks", {"Qh", "7c", "2s"}, {make_random_opponent()}, 100.0, 50.0, 1000.0));
+    }, "preflop must reject a board");
+
+    expect_invalid_argument([&] {
+        (void)poker::validate_game_state(make_game_state(poker::Street::flop, "As", "Ks", {}, {make_random_opponent()}, 100.0, 50.0, 1000.0));
+    }, "flop must require three board cards");
+
+    expect_invalid_argument([&] {
+        (void)poker::validate_game_state(make_game_state(poker::Street::turn, "As", "Ks", {"Qh", "7c", "2s"}, {make_random_opponent()}, 100.0, 50.0, 1000.0));
+    }, "turn must require four board cards");
+
+    expect_invalid_argument([&] {
+        (void)poker::validate_game_state(make_game_state(poker::Street::river, "As", "Ks", {"Qh", "7c", "2s", "Td"}, {make_random_opponent()}, 100.0, 50.0, 1000.0));
+    }, "river must require five board cards");
+
+    expect_invalid_argument([&] {
+        (void)poker::validate_game_state(make_game_state(poker::Street::flop, "As", "As", {"Qh", "7c", "2s"}, {make_random_opponent()}, 100.0, 50.0, 1000.0));
+    }, "duplicate hero cards should be rejected");
+
+    expect_invalid_argument([&] {
+        (void)poker::validate_game_state(make_game_state(poker::Street::flop, "As", "Ks", {"As", "7c", "2s"}, {make_random_opponent()}, 100.0, 50.0, 1000.0));
+    }, "hero and board overlap should be rejected");
+
+    expect_invalid_argument([&] {
+        (void)poker::validate_game_state(make_game_state(poker::Street::flop, "As", "Ks", {"Qh", "7c", "2s"}, {make_specific_opponent("As", "Qd")}, 100.0, 50.0, 1000.0));
+    }, "hero and opponent overlap should be rejected");
+
+    expect_invalid_argument([&] {
+        (void)poker::validate_game_state(make_game_state(poker::Street::flop, "As", "Ks", {"Qh", "7c", "2s"}, {make_specific_opponent("Qd", "Jd")}, -1.0, 50.0, 1000.0));
+    }, "negative pot should be rejected");
+
+    expect_invalid_argument([&] {
+        (void)poker::validate_game_state(make_game_state(poker::Street::flop, "As", "Ks", {"Qh", "7c", "2s"}, {make_specific_opponent("Qd", "Jd")}, 100.0, -1.0, 1000.0));
+    }, "negative call should be rejected");
+
+    expect_invalid_argument([&] {
+        (void)poker::validate_game_state(make_game_state(poker::Street::flop, "As", "Ks", {"Qh", "7c", "2s"}, {make_specific_opponent("Qd", "Jd")}, 100.0, 50.0, 40.0));
+    }, "call amount greater than stack should be rejected in GameState");
+
+    expect_invalid_argument([&] {
+        (void)poker::validate_game_state(make_game_state(poker::Street::flop, "As", "Ks", {"Qh", "7c", "2s"}, {make_specific_opponent("Qd", "Jd")}, 100.0, 50.0, -1.0));
+    }, "negative stack should be rejected");
+}
+
+void test_game_state_equity_dispatch() {
+    const poker::GameState specific_state = make_game_state(poker::Street::flop,
+                                                            "As",
+                                                            "Ks",
+                                                            {"Qh", "7c", "2s"},
+                                                            {make_specific_opponent("Qd", "Qc")},
+                                                            100.0,
+                                                            50.0,
+                                                            1000.0);
+    const poker::GameState range_state = make_game_state(poker::Street::flop,
+                                                         "As",
+                                                         "Ks",
+                                                         {"Qh", "7c", "2s"},
+                                                         {make_range_opponent("QQ+, AJs+, KQs")},
+                                                         100.0,
+                                                         50.0,
+                                                         1000.0);
+    const poker::GameState random_state = make_game_state(poker::Street::flop,
+                                                          "As",
+                                                          "Ks",
+                                                          {"Qh", "7c", "2s"},
+                                                          {make_random_opponent()},
+                                                          100.0,
+                                                          50.0,
+                                                          1000.0);
+
+    const poker::HoldemHand hero = make_hand("As", "Ks", {"Qh", "7c", "2s"});
+    const poker::HandCombo specific_combo(card("Qd"), card("Qc"));
+    const poker::HandRange singleton_range = poker::HandRange::from_combo(specific_combo);
+
+    const poker::EquityResult direct_specific = poker::calculate_equity(hero, singleton_range, exact_options());
+    const poker::EquityResult state_specific = poker::calculate_equity(specific_state, exact_options());
+    expect_close(state_specific.equity, direct_specific.equity, 1e-12, "specific opponent state should match direct singleton range equity");
+
+    const poker::HandRange villain_range = poker::HandRange::parse("QQ+, AJs+, KQs");
+    const poker::EquityResult direct_range = poker::calculate_equity(hero, villain_range, exact_options());
+    const poker::EquityResult state_range = poker::calculate_equity(range_state, exact_options());
+    expect_close(state_range.equity, direct_range.equity, 1e-12, "range opponent state should match direct range equity");
+
+    const poker::EquityResult direct_random = poker::calculate_equity(hero, 1U, exact_options());
+    const poker::EquityResult state_random = poker::calculate_equity(random_state, exact_options());
+    expect_close(state_random.equity, direct_random.equity, 1e-12, "random opponent state should match direct random equity");
 }
 
 void test_range_equity_smoke_and_card_removal() {
@@ -974,6 +1177,9 @@ int main() {
         !run_test("test_range_membership", test_range_membership) ||
         !run_test("test_handcombo_canonicalization", test_handcombo_canonicalization) ||
         !run_test("test_range_invalid_syntax", test_range_invalid_syntax) ||
+        !run_test("test_betting_validation_and_legal_actions", test_betting_validation_and_legal_actions) ||
+        !run_test("test_game_state_validation", test_game_state_validation) ||
+        !run_test("test_game_state_equity_dispatch", test_game_state_equity_dispatch) ||
         !run_test("test_ev_calculations", test_ev_calculations) ||
         !run_test("test_range_equity_smoke_and_card_removal", test_range_equity_smoke_and_card_removal) ||
         !run_test("test_range_vs_range_river_manual", test_range_vs_range_river_manual) ||

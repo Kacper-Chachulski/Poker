@@ -37,8 +37,16 @@ PotOddsResult calculate_pot_odds(double pot_before_call, double call_amount) {
     return result;
 }
 
+PotOddsResult calculate_pot_odds(const BettingState& betting) {
+    return calculate_pot_odds(betting.current_pot, betting.call_amount);
+}
+
 double calculate_break_even_equity(double pot_before_call, double call_amount) {
     return calculate_pot_odds(pot_before_call, call_amount).required_equity;
+}
+
+double calculate_break_even_equity(const BettingState& betting) {
+    return calculate_break_even_equity(betting.current_pot, betting.call_amount);
 }
 
 double calculate_call_ev(double equity, double pot_before_call, double call_amount) {
@@ -49,11 +57,19 @@ double calculate_call_ev(double equity, double pot_before_call, double call_amou
     return equity * pot_before_call - (1.0 - equity) * call_amount;
 }
 
+double calculate_call_ev(double equity, const BettingState& betting) {
+    return calculate_call_ev(equity, betting.current_pot, betting.call_amount);
+}
+
 double calculate_fold_ev(double pot_before_call, double call_amount) {
     validate_money_value(pot_before_call, "Pot before call must be non-negative and finite");
     validate_money_value(call_amount, "Call amount must be non-negative and finite");
 
     return 0.0;
+}
+
+double calculate_fold_ev(const BettingState& betting) {
+    return calculate_fold_ev(betting.current_pot, betting.call_amount);
 }
 
 }  // namespace poker

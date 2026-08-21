@@ -57,6 +57,23 @@ fold_ev = 0
 If `call_amount` is `0`, the break-even equity is `0` and the CLI reports pot odds as
 `N/A` because there is no price to pay.
 
+## Architecture
+
+The C++ code is layered so the decision math stays separate from card logic and equity
+evaluation:
+
+```text
+Cards -> Hand evaluation -> Ranges -> Equity -> GameState -> BettingState -> EV -> Decision Engine
+```
+
+`GameState` bridges a real decision spot to the existing equity API. It stores street,
+board, hero hand, opponent representation, and pot information, then dispatches into the
+already-tested equity layer.
+
+`BettingState` sits one layer below `GameState` and represents the legal structure of the
+current decision: pot, call amount, stack, and whether check/bet/raise/all-in actions are
+available. It does not choose an action or score one strategically.
+
 ## Python Environment
 
 Create a virtual environment from the repository root:

@@ -289,6 +289,13 @@ std::size_t hash_value(const HandCombo& combo) noexcept {
     return static_cast<std::size_t>(cards[0].index()) * 53U + cards[1].index();
 }
 
+HandRange HandRange::from_combo(const HandCombo& combo) {
+    std::bitset<kComboUniverseSize> membership{};
+    const std::array<Card, 2> cards = combo.cards();
+    add_combo(membership, cards[0], cards[1]);
+    return HandRange(std::move(membership));
+}
+
 HandRange::HandRange(std::bitset<kComboUniverseSize> membership)
     : membership_(std::move(membership)) {
     combos_.reserve(membership_.count());
