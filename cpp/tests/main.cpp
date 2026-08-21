@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "poker/card.hpp"
+#include "poker/decision.hpp"
 #include "poker/deck.hpp"
 #include "poker/game_state.hpp"
 #include "poker/ev.hpp"
@@ -167,6 +168,17 @@ poker::GameState make_game_state(poker::Street street,
     state.opponents = opponents;
     state.player_count = 1U + opponents.size();
     return state;
+}
+
+poker::GameState make_royal_tie_state(std::initializer_list<poker::Opponent> opponents) {
+    return make_game_state(poker::Street::river,
+                           "2c",
+                           "3d",
+                           {"As", "Ks", "Qs", "Js", "Ts"},
+                           opponents,
+                           100.0,
+                           50.0,
+                           1000.0);
 }
 
 void expect_category(const poker::HandValue value,
@@ -670,6 +682,212 @@ void test_game_state_equity_dispatch() {
     expect_close(state_random.equity, direct_random.equity, 1e-12, "random opponent state should match direct random equity");
 }
 
+void test_game_state_mixed_exact_equity() {
+    const poker::EquityOptions exact = exact_options();
+
+    const poker::EquityResult specific_random = poker::calculate_equity(
+        make_royal_tie_state({make_specific_opponent("4c", "5d"), make_random_opponent()}),
+        exact);
+    expect_eq(specific_random.evaluated_states, 903U, "specific plus random should enumerate the remaining river combinations");
+    expect_close(specific_random.win_probability, 0.0, 1e-12, "royal board should force no wins");
+    expect_close(specific_random.tie_probability, 1.0, 1e-12, "royal board should force all ties");
+    expect_close(specific_random.loss_probability, 0.0, 1e-12, "royal board should force no losses");
+    expect_close(specific_random.equity, 1.0 / 3.0, 1e-12, "royal board should split equity evenly across three players");
+
+    const poker::EquityResult range_random = poker::calculate_equity(
+        make_royal_tie_state({make_range_opponent("AK"), make_random_opponent()}),
+        exact);
+    expect_eq(range_random.evaluated_states, 8127U, "range plus random should enumerate all legal concrete tuples");
+    expect_close(range_random.win_probability, 0.0, 1e-12, "royal board should force no wins");
+    expect_close(range_random.tie_probability, 1.0, 1e-12, "royal board should force all ties");
+    expect_close(range_random.loss_probability, 0.0, 1e-12, "royal board should force no losses");
+    expect_close(range_random.equity, 1.0 / 3.0, 1e-12, "royal board should split equity evenly across three players");
+
+    const poker::EquityResult range_range = poker::calculate_equity(
+        make_royal_tie_state({make_range_opponent("AA"), make_range_opponent("KK")}),
+        exact);
+    expect_eq(range_range.evaluated_states, 9U, "AA versus KK should leave 3 by 3 legal concrete pairs on the royal board");
+    expect_close(range_range.win_probability, 0.0, 1e-12, "royal board should force no wins");
+    expect_close(range_range.tie_probability, 1.0, 1e-12, "royal board should force all ties");
+    expect_close(range_range.loss_probability, 0.0, 1e-12, "royal board should force no losses");
+    expect_close(range_range.equity, 1.0 / 3.0, 1e-12, "royal board should split equity evenly across three players");
+
+    const poker::EquityResult specific_range_random = poker::calculate_equity(
+        make_royal_tie_state({make_specific_opponent("4c", "5d"), make_range_opponent("AA"), make_random_opponent()}),
+        exact);
+    expect_eq(specific_range_random.evaluated_states, 2460U, "specific plus range plus random should respect card removal across all seats");
+    expect_close(specific_range_random.win_probability, 0.0, 1e-12, "royal board should force no wins");
+    expect_close(specific_range_random.tie_probability, 1.0, 1e-12, "royal board should force all ties");
+    expect_close(specific_range_random.loss_probability, 0.0, 1e-12, "royal board should force no losses");
+    expect_close(specific_range_random.equity, 0.25, 1e-12, "royal board should split equity evenly across four players");
+
+    const poker::EquityResult two_random = poker::calculate_equity(
+        make_royal_tie_state({make_random_opponent(), make_random_opponent()}),
+        exact);
+    expect_eq(two_random.evaluated_states, theoretical_exact_states(5U, 2U), "two random opponents should enumerate the full river state space");
+    expect_close(two_random.win_probability, 0.0, 1e-12, "royal board should force no wins");
+    expect_close(two_random.tie_probability, 1.0, 1e-12, "royal board should force all ties");
+    expect_close(two_random.loss_probability, 0.0, 1e-12, "royal board should force no losses");
+    expect_close(two_random.equity, 1.0 / 3.0, 1e-12, "royal board should split equity evenly across three players");
+}
+
+void test_game_state_mixed_monte_carlo() {
+    const poker::GameState mixed_state = make_game_state(poker::Street::river,
+                                                         "As",
+                                                         "Ks",
+                                                         {"Qh", "Jh", "Th", "9s", "2d"},
+                                                         {make_specific_opponent("4c", "5d"), make_range_opponent("AA"), make_random_opponent()},
+                                                         100.0,
+                                                         50.0,
+                                                         1000.0);
+
+    const poker::EquityResult exact = poker::calculate_equity(mixed_state, exact_options());
+    const poker::EquityResult monte = poker::calculate_equity(mixed_state, monte_carlo_options(20000U, 20260821U));
+
+    expect_true(std::fabs(exact.equity - monte.equity) < 0.03,
+                "mixed Monte Carlo should converge toward the exact mixed equity");
+
+    const poker::EquityResult first = poker::calculate_equity(mixed_state, monte_carlo_options(3000U, 424242U));
+    const poker::EquityResult second = poker::calculate_equity(mixed_state, monte_carlo_options(3000U, 424242U));
+    expect_true(first.win_probability == second.win_probability &&
+                first.tie_probability == second.tie_probability &&
+                first.loss_probability == second.loss_probability &&
+                first.equity == second.equity,
+                "mixed Monte Carlo should remain deterministic with a fixed seed");
+}
+
+void test_game_state_mixed_validation() {
+    expect_invalid_argument([&] {
+        (void)poker::calculate_equity(make_game_state(poker::Street::river,
+                                                      "As",
+                                                      "Ah",
+                                                      {"Qd", "Jd", "Td", "2c", "3s"},
+                                                      {make_specific_opponent("Ac", "Ad"), make_range_opponent("AA")},
+                                                      100.0,
+                                                      50.0,
+                                                      1000.0),
+                                       exact_options());
+    }, "fully blocked range should be rejected in mixed GameState equity");
+
+    expect_invalid_argument([&] {
+        (void)poker::calculate_equity(make_game_state(poker::Street::river,
+                                                      "As",
+                                                      "Ks",
+                                                      {"Qh", "Jh", "Th", "9s", "2d"},
+                                                      {make_random_opponent(),
+                                                       make_random_opponent(),
+                                                       make_random_opponent(),
+                                                       make_random_opponent(),
+                                                       make_random_opponent(),
+                                                       make_random_opponent()},
+                                                      100.0,
+                                                      50.0,
+                                                      1000.0),
+                                       exact_options());
+    }, "opponent count should not exceed the table limit");
+}
+
+void test_decision_engine() {
+    const poker::GameState facing_bet = make_game_state(poker::Street::flop,
+                                                        "As",
+                                                        "Ks",
+                                                        {"Qh", "7c", "2s"},
+                                                        {make_random_opponent()},
+                                                        100.0,
+                                                        50.0,
+                                                        500.0,
+                                                        50.0,
+                                                        false);
+
+    const poker::DecisionResult positive = poker::evaluate_decision(facing_bet, 0.40);
+    expect_true(positive.best_action.has_value() && *positive.best_action == poker::BettingAction::call,
+                "best action should be call when call EV is positive");
+    expect_true(positive.best_ev.has_value(), "best EV should be present when a supported action exists");
+    expect_close(*positive.best_ev, 10.0, 1e-12, "best EV should match call EV");
+    expect_eq(static_cast<std::uint64_t>(positive.actions.size()), 4U, "facing a bet should produce four legal actions");
+
+    const auto fold_eval = std::find_if(positive.actions.begin(), positive.actions.end(), [](const poker::ActionEvaluation& evaluation) {
+        return evaluation.action == poker::BettingAction::fold;
+    });
+    const auto call_eval = std::find_if(positive.actions.begin(), positive.actions.end(), [](const poker::ActionEvaluation& evaluation) {
+        return evaluation.action == poker::BettingAction::call;
+    });
+    const auto raise_eval = std::find_if(positive.actions.begin(), positive.actions.end(), [](const poker::ActionEvaluation& evaluation) {
+        return evaluation.action == poker::BettingAction::raise;
+    });
+    const auto all_in_eval = std::find_if(positive.actions.begin(), positive.actions.end(), [](const poker::ActionEvaluation& evaluation) {
+        return evaluation.action == poker::BettingAction::all_in;
+    });
+
+    expect_true(fold_eval != positive.actions.end() && fold_eval->legal && fold_eval->supported && fold_eval->ev.has_value() && *fold_eval->ev == 0.0,
+                "fold should be legal, supported, and zero EV");
+    expect_true(call_eval != positive.actions.end() && call_eval->legal && call_eval->supported && call_eval->ev.has_value() && std::fabs(*call_eval->ev - 10.0) < 1e-12,
+                "call should be legal, supported, and positive EV");
+    expect_true(raise_eval != positive.actions.end() && raise_eval->legal && !raise_eval->supported && !raise_eval->ev.has_value(),
+                "raise should be legal but unsupported");
+    expect_true(all_in_eval != positive.actions.end() && all_in_eval->legal && !all_in_eval->supported && !all_in_eval->ev.has_value(),
+                "all-in should be legal but unsupported");
+
+    const poker::DecisionResult break_even = poker::evaluate_decision(facing_bet, 1.0 / 3.0);
+    const auto break_even_call = std::find_if(break_even.actions.begin(), break_even.actions.end(), [](const poker::ActionEvaluation& evaluation) {
+        return evaluation.action == poker::BettingAction::call;
+    });
+    expect_true(break_even_call != break_even.actions.end() && break_even_call->ev.has_value() && std::fabs(*break_even_call->ev) < 1e-12,
+                "break-even call EV should be approximately zero");
+
+    const poker::DecisionResult negative = poker::evaluate_decision(facing_bet, 0.25);
+    expect_true(negative.best_action.has_value() && *negative.best_action == poker::BettingAction::fold,
+                "fold should be the best supported action when call EV is negative");
+    const auto negative_call = std::find_if(negative.actions.begin(), negative.actions.end(), [](const poker::ActionEvaluation& evaluation) {
+        return evaluation.action == poker::BettingAction::call;
+    });
+    expect_true(negative_call != negative.actions.end() && negative_call->ev.has_value() && *negative_call->ev < 0.0,
+                "call EV should be negative below break-even");
+
+    const poker::DecisionResult no_bet = poker::evaluate_decision(make_game_state(poker::Street::preflop,
+                                                                                  "As",
+                                                                                  "Ks",
+                                                                                  {},
+                                                                                  {make_random_opponent()},
+                                                                                  100.0,
+                                                                                  0.0,
+                                                                                  500.0,
+                                                                                  10.0,
+                                                                                  true),
+                                                                  0.40);
+    expect_true(!no_bet.best_action.has_value(), "unsupported-only states should not select a best action");
+    for (const poker::ActionEvaluation& evaluation : no_bet.actions) {
+        expect_true(evaluation.legal && !evaluation.supported && !evaluation.ev.has_value(),
+                    "no-bet actions should be legal but unsupported");
+    }
+
+    const poker::ActionEvaluation illegal_call = poker::evaluate_action(poker::BettingState{100.0, 0.0, 500.0, 10.0, true}, 0.40, poker::BettingAction::call);
+    expect_true(!illegal_call.legal && !illegal_call.supported && !illegal_call.ev.has_value(),
+                "illegal actions should not be evaluated");
+
+    expect_invalid_argument([&] {
+        (void)poker::evaluate_action(facing_bet, 1.5, poker::BettingAction::call);
+    }, "invalid equity should be rejected by decision evaluation");
+
+    expect_invalid_argument([&] {
+        (void)poker::evaluate_decision(make_game_state(poker::Street::flop,
+                                                      "As",
+                                                      "Ks",
+                                                      {},
+                                                      {make_random_opponent()},
+                                                      100.0,
+                                                      50.0,
+                                                      500.0,
+                                                      50.0,
+                                                      false),
+                                       0.40);
+    }, "invalid GameState should be rejected by decision evaluation");
+
+    expect_invalid_argument([&] {
+        (void)poker::evaluate_decision(poker::BettingState{100.0, -1.0, 500.0, 50.0, false}, 0.40);
+    }, "invalid BettingState should be rejected by decision evaluation");
+}
+
 void test_range_equity_smoke_and_card_removal() {
     const poker::HoldemHand hero = make_hand("As", "Ks", {"Qd", "Jc", "Th", "9s", "2c"});
     const poker::HandRange villain_range = poker::HandRange::parse("AK");
@@ -826,6 +1044,33 @@ void test_range_vs_range_monte_carlo_cross_validation() {
 
     expect_true(std::fabs(exact.equity - monte.equity) < 0.03,
                 "range-vs-range Monte Carlo should converge toward exact equity");
+}
+
+void test_range_vs_range_asymmetric_weighting() {
+    const poker::HandRange hero_range = poker::HandRange::parse("AK, AQ");
+    const poker::HandRange villain_range = poker::HandRange::parse("AA, KK, QQ, JJ");
+    const std::vector<poker::Card> board = make_board({"9h", "8d", "7c", "4s", "2d"});
+
+    long double weighted_equity_sum = 0.0L;
+    std::uint64_t weighted_legal_pair_count = 0U;
+
+    for (const poker::HandCombo& hero_combo : hero_range) {
+        const std::array<poker::Card, 2> cards = hero_combo.cards();
+        const poker::HoldemHand hero_hand = make_hand(cards[0].to_string(), cards[1].to_string(), {"9h", "8d", "7c", "4s", "2d"});
+        const std::size_t legal_villain_count = count_legal_villain_combos(hero_hand, villain_range);
+        if (legal_villain_count == 0U) {
+            continue;
+        }
+
+        const poker::EquityResult hero_equity = poker::calculate_equity(hero_hand, villain_range, exact_options());
+        weighted_equity_sum += static_cast<long double>(hero_equity.equity) * static_cast<long double>(legal_villain_count);
+        weighted_legal_pair_count += legal_villain_count;
+    }
+
+    const poker::EquityResult result = poker::calculate_equity(hero_range, villain_range, board, exact_options());
+    expect_true(weighted_legal_pair_count > 0U, "brute-force reference should have at least one legal ordered pair");
+    expect_close(result.equity, static_cast<double>(weighted_equity_sum / static_cast<long double>(weighted_legal_pair_count)), 1e-12,
+                "range-vs-range exact equity should weight hero combos by their legal villain counts");
 }
 
 void test_range_vs_range_monte_carlo_determinism() {
@@ -1180,6 +1425,10 @@ int main() {
         !run_test("test_betting_validation_and_legal_actions", test_betting_validation_and_legal_actions) ||
         !run_test("test_game_state_validation", test_game_state_validation) ||
         !run_test("test_game_state_equity_dispatch", test_game_state_equity_dispatch) ||
+        !run_test("test_game_state_mixed_exact_equity", test_game_state_mixed_exact_equity) ||
+        !run_test("test_game_state_mixed_monte_carlo", test_game_state_mixed_monte_carlo) ||
+        !run_test("test_game_state_mixed_validation", test_game_state_mixed_validation) ||
+        !run_test("test_decision_engine", test_decision_engine) ||
         !run_test("test_ev_calculations", test_ev_calculations) ||
         !run_test("test_range_equity_smoke_and_card_removal", test_range_equity_smoke_and_card_removal) ||
         !run_test("test_range_vs_range_river_manual", test_range_vs_range_river_manual) ||
@@ -1188,6 +1437,7 @@ int main() {
         !run_test("test_range_vs_range_flop_turn_exact", test_range_vs_range_flop_turn_exact) ||
         !run_test("test_range_vs_range_monte_carlo_cross_validation", test_range_vs_range_monte_carlo_cross_validation) ||
         !run_test("test_range_vs_range_monte_carlo_determinism", test_range_vs_range_monte_carlo_determinism) ||
+        !run_test("test_range_vs_range_asymmetric_weighting", test_range_vs_range_asymmetric_weighting) ||
         !run_test("test_range_vs_range_validation", test_range_vs_range_validation) ||
         !run_test("test_cli_help_and_usage", test_cli_help_and_usage) ||
         !run_test("test_cli_specific_hand_vs_range", test_cli_specific_hand_vs_range) ||

@@ -1,203 +1,173 @@
 # Poker Engine
 
-A small foundation for a Texas Hold'em poker engine focused on equity calculation
-and the mathematical decision primitives that sit on top of it.
-The near-term plan is to start with exact enumeration when the game state is small,
-switch to Monte Carlo simulation when the search space becomes too large, and later
-combine both strategies in a hybrid engine. Python will handle orchestration,
-analysis, experiments, and visualization. C++ will be used for the computationally
-intensive parts if benchmarks show a meaningful advantage.
+A compact Texas Hold'em engine focused on exact equity, Monte Carlo equity, and the math-only
+decision layers built on top of them.
 
-## Planned Architecture
-
-- `python/poker/` will hold orchestration code, experiment helpers, and analysis tools.
-- `cpp/` will contain the performance-sensitive engine and benchmarks.
-- `benchmarks/` will compare Python and C++ implementations of representative workloads.
-- `tests/` and `python/tests/` are reserved for future test coverage.
-- `notebooks/` is reserved for analysis and visualization notebooks.
-
-## Current Structure
-
-```text
-poker/
-├── cpp/
-│   ├── include/
-│   └── src/
-├── python/
-│   ├── poker/
-│   └── tests/
-├── benchmarks/
-├── notebooks/
-├── tests/
-├── .gitignore
-├── README.md
-└── requirements.txt
-```
-
-## Decision Math
-
-The `poker` C++ library now exposes a small EV layer in `cpp/include/poker/ev.hpp`.
-It is independent from the equity engine and accepts an already-calculated equity
-value.
-
-The pot convention is:
-
-- `pot_before_call` is the amount already in the pot before Hero calls.
-- if Hero calls `X`, the final pot is `pot_before_call + X`.
-- call EV uses the net incremental value of calling, not the total pot size.
-
-Formulas:
-
-```text
-required_equity = call_amount / (pot_before_call + call_amount)
-call_ev = equity * pot_before_call - (1 - equity) * call_amount
-fold_ev = 0
-```
-
-If `call_amount` is `0`, the break-even equity is `0` and the CLI reports pot odds as
-`N/A` because there is no price to pay.
+The project is intentionally scoped around concrete card combinations and deterministic math.
+It does not attempt GTO solving, CFR, opponent modeling, betting trees, or strategic raise EV.
 
 ## Architecture
 
-The C++ code is layered so the decision math stays separate from card logic and equity
-evaluation:
-
 ```text
-Cards -> Hand evaluation -> Ranges -> Equity -> GameState -> BettingState -> EV -> Decision Engine
+Cards / Deck
+-> Hand evaluation
+-> HandRange
+-> Exact + Monte Carlo equity
+-> GameState
+-> BettingState
+-> EV
+-> Decision Engine
 ```
 
-`GameState` bridges a real decision spot to the existing equity API. It stores street,
-board, hero hand, opponent representation, and pot information, then dispatches into the
-already-tested equity layer.
+## What Is Implemented
 
-`BettingState` sits one layer below `GameState` and represents the legal structure of the
-current decision: pot, call amount, stack, and whether check/bet/raise/all-in actions are
-available. It does not choose an action or score one strategically.
+- Card and deck primitives
+- Hold'em hand evaluation
+- Concrete 1326-combo hand ranges
+- Range parsing and membership checks
+- Specific-hand equity
+- Specific-hand vs range equity
+- Range-vs-range equity
+- Mixed multi-opponent equity through `GameState`
+- Exact enumeration and Monte Carlo simulation
+- Pot odds and break-even equity
+- Call EV and fold EV
+- Basic decision evaluation for supported actions
 
-## Python Environment
+## Range Syntax
 
-Create a virtual environment from the repository root:
+Supported notation in `HandRange::parse`:
 
-```powershell
-python -m venv .venv
-```
+- Pocket pairs: `AA`, `KK`, `QQ`, `22`, `QQ+`, `22+`
+- Suited hands: `AKs`, `A5s`, `QJs`, `A5s+`
+- Offsuit hands: `AKo`, `KQo`
+- Any-suit hands: `AK`, `KQ`, `76`
+- Comma-separated unions with optional whitespace
 
-Activate it in PowerShell:
+Not supported yet:
 
-```powershell
-.\.venv\Scripts\Activate.ps1
-```
+- Bounded ranges using `-`
+- Offsuit plus notation
+- Any-suit plus notation
 
-The initial benchmark uses only the Python standard library, so there is nothing to
-install yet.
+## Equity Model
 
-## C++ Build With CMake
+Exact equity enumerates concrete legal hole-card combinations and remaining board runouts.
+Monte Carlo samples from the same state space using a seedable RNG.
 
-Configure the C++ project from the repository root:
+`EquityResult` reports:
+
+- `win_probability`
+- `tie_probability`
+- `loss_probability`
+- `equity`
+- `simulations`
+- `evaluated_states`
+
+## GameState
+
+`GameState` packages a real decision spot:
+
+- `street`
+- `hero`
+- `betting`
+- `opponents`
+- `player_count`
+
+`Opponent` is a variant of `HandCombo`, `HandRange`, or `RandomOpponent`.
+Specific opponents are fixed cards. Range opponents are concrete ranges. Random opponents use
+all currently legal two-card combinations.
+
+Mixed multi-opponent equity is supported. The engine rejects states where a known opponent
+collides with the hero or board, or where a range has no legal concrete combinations left.
+
+## Betting, EV, and Decision
+
+`BettingState` models the current decision structure:
+
+- `current_pot`
+- `call_amount`
+- `hero_stack`
+- `minimum_raise_amount`
+- `check_allowed`
+
+`EV` helpers compute:
+
+- pot odds
+- break-even equity
+- call EV
+- fold EV
+
+The first decision layer only evaluates actions whose EV is mathematically known from the
+current spot. Fold and call are supported. Check, bet, raise, and all-in are represented
+explicitly when legal, but remain unsupported until fold-equity and future-state modeling are
+added.
+
+## Build
+
+Configure and build from the repository root:
 
 ```powershell
 cmake -S cpp -B cpp/build
-```
-
-Build the benchmark:
-
-```powershell
 cmake --build cpp/build
 ```
 
-If you are using a multi-config generator such as Visual Studio, build the Release
-configuration explicitly:
+On this machine, MinGW validation used `C:\Program Files\CodeBlocks\MinGW\bin`. If your
+compiler is already on `PATH`, the commands above are enough.
 
-```powershell
-cmake --build cpp/build --config Release
-```
+For MinGW on Windows, the CMake build copies the runtime DLLs next to the executables so they
+can run without extra `PATH` setup.
 
-On this machine, validation used the MinGW toolchain installed under
-`C:\Program Files\CodeBlocks\MinGW\bin`. If your compiler is already on PATH,
-the shorter commands above are enough.
+## CLI
 
-## C++ CLI Examples
+The main executable is `cpp\build\poker.exe`.
 
-The `poker` executable now supports specific-hand equity, specific-hand vs range,
-and range vs range through explicit range flags.
+Supported commands:
 
-Specific hand vs specific hand:
+- `equity`
+- `pot-odds`
+- `ev`
 
-```powershell
-cpp\build\poker.exe equity As Ks --opponents 1 --board Qh 7c 2s --method exact
-```
-
-Specific hand vs range:
+Examples:
 
 ```powershell
 cpp\build\poker.exe equity As Ks --villain-range "QQ+, AJs+, KQs" --board Qh 7c 2s --method exact
-```
-
-Range vs range:
-
-```powershell
 cpp\build\poker.exe equity --hero-range "QQ+, AKs" --villain-range "JJ+, AQs+" --board Qh 7c 2s --method montecarlo --simulations 1000000 --seed 12345
-```
-
-Run `cpp\build\poker.exe equity --help` to print the full usage summary.
-
-Pot odds:
-
-```powershell
 cpp\build\poker.exe pot-odds --pot 100 --call 50
-```
-
-EV comparison:
-
-```powershell
 cpp\build\poker.exe ev --pot 100 --call 50 --equity 0.40
 ```
 
-Example output:
+Current equity CLI modes:
 
-```text
-Pot before call: 100.00
-Call amount:      50.00
-Final pot:       150.00
-Required equity: 33.33%
-Pot odds:        2.00:1
-Equity:          40.00%
-Call EV:         +10.00
-Fold EV:         +0.00
-Decision:        CALL
-```
+- specific hand vs specific hand, using positional hero cards and `--opponents`
+- specific hand vs range, using positional hero cards and `--villain-range`
+- range vs range, using `--hero-range` and `--villain-range`
 
-## Run The Benchmarks
+Run `cpp\build\poker.exe equity --help` for the full syntax.
 
-Run the Python benchmark and point it at the compiled C++ executable:
+## Benchmarks
 
-```powershell
-python benchmarks\benchmark.py --iterations 10000000 --cpp-executable cpp\build\poker_benchmark.exe
-```
+Two benchmark executables are built with the engine:
 
-If your CMake generator places the executable in a configuration subfolder, adjust the
-path accordingly, for example:
+- `cpp\build\poker_exact_benchmark.exe`
+- `cpp\build\poker_equity_benchmark.exe`
+
+They include a mixed multi-opponent scenario in addition to the existing fixed-opponent cases.
+
+## Tests
+
+Run the C++ test binary through CTest:
 
 ```powershell
-python benchmarks\benchmark.py --iterations 10000000 --cpp-executable cpp\build\Release\poker_benchmark.exe
+ctest --test-dir cpp/build --output-on-failure
 ```
 
-Run the C++ benchmark directly:
+## Current Limitations
 
-```powershell
-cpp\build\poker_benchmark.exe --iterations 10000000
-```
-
-On some generators the executable may live under a configuration directory such as
-`cpp\build\Release\poker_benchmark.exe`.
-
-## Notes
-
-- The first benchmark is intentionally simple: a repeated integer workload with
-  pseudo-random number generation, arithmetic, and accumulation.
-- The Python and C++ implementations use the same constants and update rules so the
-  work is equivalent.
-- When building with MinGW on Windows, the CMake target copies the required runtime
-  DLLs next to the executable so it can run without extra PATH setup.
-- The next major step is to implement the poker hand equity evaluator and then use
-  this benchmark framework to decide where C++ acceleration is worth adding.
+- No GTO solver
+- No CFR
+- No opponent behavioral model
+- No fold-equity model for raises
+- No full betting tree
+- No weighted opponent ranges
+- No advanced bet sizing strategy

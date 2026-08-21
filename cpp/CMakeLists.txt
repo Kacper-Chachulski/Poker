@@ -28,6 +28,7 @@ add_library(poker_core
     src/deck.cpp
     src/exact_equity.cpp
     src/equity.cpp
+    src/decision.cpp
     src/game_state.cpp
     src/evaluator.cpp
     src/ev.cpp

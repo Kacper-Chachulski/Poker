@@ -9,6 +9,7 @@
 #include <string_view>
 
 #include "poker/card.hpp"
+#include "poker/game_state.hpp"
 #include "poker/hand.hpp"
 #include "poker/equity.hpp"
 
@@ -18,6 +19,11 @@ struct Scenario {
     const char* name;
     poker::HoldemHand hero;
     std::size_t opponents;
+};
+
+struct MixedScenario {
+    const char* name;
+    poker::GameState state;
 };
 
 poker::Card parse_card(std::string_view text) {
@@ -115,6 +121,22 @@ std::string format_board(const poker::HoldemHand& hand) {
     return text;
 }
 
+poker::GameState make_mixed_state() {
+    poker::GameState state{};
+    state.street = poker::Street::river;
+    state.hero = make_hand("2c", "3d", {"As", "Ks", "Qs", "Js", "Ts"});
+    state.betting.current_pot = 100.0;
+    state.betting.call_amount = 50.0;
+    state.betting.hero_stack = 1000.0;
+    state.opponents = {
+        poker::Opponent{poker::HandCombo(parse_card("4c"), parse_card("5d"))},
+        poker::Opponent{poker::HandRange::parse("AA")},
+        poker::Opponent{poker::RandomOpponent{}},
+    };
+    state.player_count = 4U;
+    return state;
+}
+
 void run_scenario(const Scenario& scenario) {
     const std::uint64_t theoretical = theoretical_states(scenario.hero.board_count, scenario.opponents);
     const auto start = std::chrono::steady_clock::now();
@@ -128,6 +150,30 @@ void run_scenario(const Scenario& scenario) {
     std::cout << "  Hero: " << format_cards(scenario.hero) << '\n';
     std::cout << "  Board: " << format_board(scenario.hero) << '\n';
     std::cout << "  Opponents: " << scenario.opponents << '\n';
+    std::cout << "  Theoretical states: " << format_number(theoretical) << '\n';
+    std::cout << "  Evaluated states: " << format_number(result.evaluated_states) << '\n';
+    std::cout << std::fixed << std::setprecision(4);
+    std::cout << "  Win:   " << result.win_probability * 100.0 << "%\n";
+    std::cout << "  Tie:   " << result.tie_probability * 100.0 << "%\n";
+    std::cout << "  Loss:  " << result.loss_probability * 100.0 << "%\n";
+    std::cout << "  Equity:" << ' ' << result.equity * 100.0 << "%\n";
+    std::cout << "  Time:  " << std::setprecision(6) << elapsed.count() << " seconds\n";
+    std::cout << "  Speed: " << format_number(static_cast<std::uint64_t>(states_per_second)) << " states/sec\n\n";
+}
+
+void run_mixed_scenario(const MixedScenario& scenario) {
+    const std::uint64_t theoretical = 2460U;
+    const auto start = std::chrono::steady_clock::now();
+    const poker::EquityOptions options{};
+    const poker::EquityResult result = poker::calculate_equity(scenario.state, options);
+    const auto end = std::chrono::steady_clock::now();
+    const std::chrono::duration<double> elapsed = end - start;
+    const double states_per_second = static_cast<double>(result.evaluated_states) / elapsed.count();
+
+    std::cout << scenario.name << '\n';
+    std::cout << "  Hero: " << format_cards(scenario.state.hero) << '\n';
+    std::cout << "  Board: " << format_board(scenario.state.hero) << '\n';
+    std::cout << "  Opponents: specific + range + random" << '\n';
     std::cout << "  Theoretical states: " << format_number(theoretical) << '\n';
     std::cout << "  Evaluated states: " << format_number(result.evaluated_states) << '\n';
     std::cout << std::fixed << std::setprecision(4);
@@ -156,6 +202,8 @@ int main(int argc, char* argv[]) {
         for (const Scenario& scenario : scenarios) {
             run_scenario(scenario);
         }
+
+        run_mixed_scenario({"Mixed, specific + range + random", make_mixed_state()});
 
         return 0;
     } catch (const std::exception& error) {

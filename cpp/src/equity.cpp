@@ -234,11 +234,10 @@ EquityResult solve_range_vs_range_exact_equity(const HandRange& hero_range,
     }
 
     std::uint64_t evaluated_states = 0U;
-    std::uint64_t hero_count = 0U;
-    long double win_probability_sum = 0.0L;
-    long double tie_probability_sum = 0.0L;
-    long double loss_probability_sum = 0.0L;
-    long double equity_sum = 0.0L;
+    long double win_states = 0.0L;
+    long double tie_states = 0.0L;
+    long double loss_states = 0.0L;
+    long double equity_states = 0.0L;
 
     const std::size_t missing_board = 5U - board.size();
 
@@ -277,23 +276,22 @@ EquityResult solve_range_vs_range_exact_equity(const HandRange& hero_range,
             continue;
         }
 
-        win_probability_sum += static_cast<long double>(hero_counts.wins) / static_cast<long double>(hero_counts.states);
-        tie_probability_sum += static_cast<long double>(hero_counts.ties) / static_cast<long double>(hero_counts.states);
-        loss_probability_sum += static_cast<long double>(hero_counts.losses) / static_cast<long double>(hero_counts.states);
-        equity_sum += hero_counts.equity_sum / static_cast<long double>(hero_counts.states);
+        win_states += static_cast<long double>(hero_counts.wins);
+        tie_states += static_cast<long double>(hero_counts.ties);
+        loss_states += static_cast<long double>(hero_counts.losses);
+        equity_states += hero_counts.equity_sum;
         evaluated_states += hero_counts.states;
-        ++hero_count;
     }
 
-    if (hero_count == 0U) {
+    if (evaluated_states == 0U) {
         detail::throw_invalid("No legal hero-villain combinations remain after card removal");
     }
 
     EquityResult result{};
-    result.win_probability = static_cast<double>(win_probability_sum / static_cast<long double>(hero_count));
-    result.tie_probability = static_cast<double>(tie_probability_sum / static_cast<long double>(hero_count));
-    result.loss_probability = static_cast<double>(loss_probability_sum / static_cast<long double>(hero_count));
-    result.equity = static_cast<double>(equity_sum / static_cast<long double>(hero_count));
+    result.win_probability = static_cast<double>(win_states / static_cast<long double>(evaluated_states));
+    result.tie_probability = static_cast<double>(tie_states / static_cast<long double>(evaluated_states));
+    result.loss_probability = static_cast<double>(loss_states / static_cast<long double>(evaluated_states));
+    result.equity = static_cast<double>(equity_states / static_cast<long double>(evaluated_states));
     result.evaluated_states = evaluated_states;
     return result;
 }
