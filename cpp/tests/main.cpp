@@ -12,6 +12,7 @@
 #include <optional>
 #include <random>
 #include <stdexcept>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -24,7 +25,9 @@
 #include "poker/evaluator.hpp"
 #include "poker/hand.hpp"
 #include "poker/equity.hpp"
+#include "poker/game_session.hpp"
 #include "poker/range.hpp"
+#include "../src/equity_common.hpp"
 
 namespace {
 
@@ -330,6 +333,22 @@ CliRunResult run_cli_command(const std::string& command) {
     std::remove(output_path.c_str());
 
     return {exit_code, output};
+}
+
+std::string normalize_cli_output(const std::string& output) {
+    std::istringstream stream(output);
+    std::ostringstream normalized{};
+    std::string line{};
+
+    while (std::getline(stream, line)) {
+        if (line.rfind("Time:", 0U) == 0U || line.rfind("Elapsed:", 0U) == 0U || line.rfind("Speed:", 0U) == 0U) {
+            continue;
+        }
+
+        normalized << line << '\n';
+    }
+
+    return normalized.str();
 }
 
 void expect_cli_success(const std::string& command, std::initializer_list<std::string_view> snippets) {
@@ -638,6 +657,73 @@ void test_game_state_validation() {
     }, "negative stack should be rejected");
 }
 
+void test_action_order_layer() {
+    auto make_order = []() {
+        poker::ActionOrderState order{};
+        order.player_count = 6U;
+        order.button_seat = 0U;
+        order.street = poker::Street::preflop;
+        order.seats.assign(6U, poker::PlayerStatus::active);
+        return order;
+    };
+
+    {
+        poker::ActionOrderState order = make_order();
+        order.player_count = 2U;
+        order.seats.assign(2U, poker::PlayerStatus::active);
+        expect_true(order.first_to_act().has_value() && *order.first_to_act() == 0U, "heads-up preflop should start with the button/small blind");
+        order.street = poker::Street::flop;
+        expect_true(order.first_to_act().has_value() && *order.first_to_act() == 1U, "heads-up postflop should start with the big blind");
+    }
+
+    {
+        poker::ActionOrderState order = make_order();
+        expect_true(order.first_to_act().has_value() && *order.first_to_act() == 3U, "six-handed preflop should start left of the big blind");
+        order.street = poker::Street::flop;
+        expect_true(order.first_to_act().has_value() && *order.first_to_act() == 1U, "six-handed postflop should start left of the button");
+        order.street = poker::Street::turn;
+        expect_true(order.first_to_act().has_value() && *order.first_to_act() == 1U, "turn should keep postflop first actor order");
+        order.street = poker::Street::river;
+        expect_true(order.first_to_act().has_value() && *order.first_to_act() == 1U, "river should keep postflop first actor order");
+    }
+
+    {
+        poker::ActionOrderState order = make_order();
+        order.set_status(1U, poker::PlayerStatus::folded);
+        expect_true(order.first_to_act().has_value() && *order.first_to_act() == 3U, "small blind folding should skip to the next active seat");
+    }
+
+    {
+        poker::ActionOrderState order = make_order();
+        order.set_status(2U, poker::PlayerStatus::folded);
+        expect_true(order.first_to_act().has_value() && *order.first_to_act() == 3U, "big blind folding should skip to the next active seat");
+    }
+
+    {
+        poker::ActionOrderState order = make_order();
+        order.set_status(1U, poker::PlayerStatus::folded);
+        order.set_status(2U, poker::PlayerStatus::folded);
+        order.set_status(3U, poker::PlayerStatus::folded);
+        expect_true(order.first_to_act().has_value() && *order.first_to_act() == 4U, "multiple consecutive folds should still preserve seat order");
+    }
+
+    {
+        poker::ActionOrderState order = make_order();
+        order.set_status(4U, poker::PlayerStatus::all_in);
+        expect_true(order.first_to_act().has_value() && *order.first_to_act() == 3U, "all-in players should be skipped when selecting the first actor");
+        expect_true(order.next_to_act(3U).has_value() && *order.next_to_act(3U) == 5U, "all-in players should be skipped when advancing to the next actor");
+    }
+
+    {
+        poker::ActionOrderState order = make_order();
+        for (std::size_t seat = 1U; seat < 6U; ++seat) {
+            order.set_status(seat, poker::PlayerStatus::folded);
+        }
+        expect_true(order.hand_over(), "one active player remaining should end the hand");
+        expect_true(!order.first_to_act().has_value(), "one active player remaining should not produce a next actor");
+    }
+}
+
 void test_game_state_equity_dispatch() {
     const poker::GameState specific_state = make_game_state(poker::Street::flop,
                                                             "As",
@@ -844,6 +930,46 @@ void test_decision_engine() {
     expect_true(negative_call != negative.actions.end() && negative_call->ev.has_value() && *negative_call->ev < 0.0,
                 "call EV should be negative below break-even");
 
+    const poker::DecisionResult strong_no_bet = poker::evaluate_decision(poker::BettingState{100.0, 0.0, 500.0, 10.0, true}, 0.72);
+    expect_true(strong_no_bet.best_action.has_value() && *strong_no_bet.best_action == poker::BettingAction::bet,
+                "strong no-bet equity should recommend betting");
+    expect_true(strong_no_bet.heuristic_recommendation && strong_no_bet.suggested_amount.has_value(),
+                "bet recommendation should include a suggested amount");
+    expect_close(*strong_no_bet.suggested_amount, 66.0, 1e-12, "opening bet should default to 66% of pot");
+
+    const poker::DecisionResult weak_no_bet = poker::evaluate_decision(poker::BettingState{100.0, 0.0, 500.0, 10.0, true}, 0.20);
+    expect_true(weak_no_bet.best_action.has_value() && *weak_no_bet.best_action == poker::BettingAction::check,
+                "weak no-bet equity should recommend checking");
+    expect_true(weak_no_bet.heuristic_recommendation && !weak_no_bet.suggested_amount.has_value(),
+                "check recommendation should not invent an amount");
+
+    const poker::BettingState raise_facing_bet{100.0, 20.0, 500.0, 20.0, false};
+    const poker::DecisionResult strong_raise = poker::evaluate_decision(raise_facing_bet, 0.75);
+    expect_true(strong_raise.best_action.has_value() && *strong_raise.best_action == poker::BettingAction::raise,
+                "strong facing-bet equity should recommend raising");
+    expect_true(strong_raise.suggested_amount.has_value(), "raise should include a suggested amount");
+    expect_close(*strong_raise.suggested_amount, 50.0, 1e-12, "raise sizing should default to 2.5x the call amount");
+
+    const poker::DecisionResult medium_call = poker::evaluate_decision(raise_facing_bet, 0.50);
+    expect_true(medium_call.best_action.has_value() && *medium_call.best_action == poker::BettingAction::call,
+                "medium facing-bet equity should recommend calling");
+
+    const poker::DecisionResult weak_fold = poker::evaluate_decision(raise_facing_bet, 0.10);
+    expect_true(weak_fold.best_action.has_value() && *weak_fold.best_action == poker::BettingAction::fold,
+                "weak facing-bet equity should recommend folding");
+
+    const poker::DecisionResult capped_raise = poker::evaluate_decision(poker::BettingState{100.0, 20.0, 45.0, 1.0, false}, 0.90);
+    expect_true(capped_raise.best_action.has_value() && *capped_raise.best_action == poker::BettingAction::all_in,
+                "raise should cap at the available stack and fall back to all-in");
+    expect_true(capped_raise.suggested_amount.has_value() && *capped_raise.suggested_amount == 45.0,
+                "capped raise should report the full stack amount");
+
+    const poker::DecisionResult all_in_no_bet = poker::evaluate_decision(poker::BettingState{100.0, 0.0, 40.0, 10.0, true}, 0.80);
+    expect_true(all_in_no_bet.best_action.has_value() && *all_in_no_bet.best_action == poker::BettingAction::all_in,
+                "strong no-bet short stack should recommend all-in");
+    expect_true(all_in_no_bet.suggested_amount.has_value() && *all_in_no_bet.suggested_amount == 40.0,
+                "all-in recommendation should expose the full stack amount");
+
     const poker::DecisionResult no_bet = poker::evaluate_decision(make_game_state(poker::Street::preflop,
                                                                                   "As",
                                                                                   "Ks",
@@ -855,7 +981,8 @@ void test_decision_engine() {
                                                                                   10.0,
                                                                                   true),
                                                                   0.40);
-    expect_true(!no_bet.best_action.has_value(), "unsupported-only states should not select a best action");
+    expect_true(no_bet.best_action.has_value() && *no_bet.best_action == poker::BettingAction::check,
+                "unsupported-only no-bet states should fall back to checking");
     for (const poker::ActionEvaluation& evaluation : no_bet.actions) {
         expect_true(evaluation.legal && !evaluation.supported && !evaluation.ev.has_value(),
                     "no-bet actions should be legal but unsupported");
@@ -864,6 +991,10 @@ void test_decision_engine() {
     const poker::ActionEvaluation illegal_call = poker::evaluate_action(poker::BettingState{100.0, 0.0, 500.0, 10.0, true}, 0.40, poker::BettingAction::call);
     expect_true(!illegal_call.legal && !illegal_call.supported && !illegal_call.ev.has_value(),
                 "illegal actions should not be evaluated");
+
+    const poker::ActionEvaluation illegal_raise = poker::evaluate_action(raise_facing_bet, 0.75, poker::BettingAction::bet);
+    expect_true(!illegal_raise.legal && !illegal_raise.supported && !illegal_raise.ev.has_value(),
+                "illegal actions should never be recommended or evaluated");
 
     expect_invalid_argument([&] {
         (void)poker::evaluate_action(facing_bet, 1.5, poker::BettingAction::call);
@@ -1168,6 +1299,7 @@ void test_cli_help_and_usage() {
     expect_cli_success("poker.exe equity --help", {"Usage:", "--hero-range", "--villain-range"});
     expect_cli_success("poker.exe pot-odds --help", {"Usage:", "pot-odds", "--pot", "--call"});
     expect_cli_success("poker.exe ev --help", {"Usage:", "poker ev", "--equity"});
+    expect_cli_success("poker.exe decision --help", {"Usage:", "poker decision", "--opponents", "--call"});
 }
 
 void test_cli_specific_hand_vs_range() {
@@ -1240,6 +1372,163 @@ void test_cli_pot_odds_and_ev() {
     expect_cli_success(
         "poker.exe ev --pot 100 --call 50 --equity 0.30",
         {"Call EV:         -5.00", "Decision:        FOLD"});
+}
+
+void test_cli_decision_command() {
+    expect_cli_success(
+        "poker.exe decision As Ks --board Qh 7c 2s --opponents 1 --pot 100 --call 50 --method exact",
+        {"Hero: As Ks", "Board: Qh 7c 2s", "Opponents: 1", "Method: Exact", "Equity:", "Required equity:", "Actions:", "Recommendation: CALL"});
+
+    expect_cli_success(
+        "poker.exe decision 2c 3d --board Ah Kd Qs --opponents 1 --pot 5 --call 20 --method exact",
+        {"Hero: 2c 3d", "Board: Ah Kd Qs", "Opponents: 1", "Method: Exact", "Recommendation: FOLD"});
+
+    expect_cli_success(
+        "poker.exe decision As Ad --board Qh 7c 2s --opponents 1 --pot 100 --call 0 --stack 200 --method exact",
+        {"Recommendation: BET", "Suggested amount:", "Reason: Strong equity"});
+
+    const CliRunResult first = run_cli_command("poker.exe decision As Ks --board Qh 7c 2s --opponents 2 --pot 100 --call 50 --method montecarlo --simulations 1000 --seed 12345");
+    const CliRunResult second = run_cli_command("poker.exe decision As Ks --board Qh 7c 2s --opponents 2 --pot 100 --call 50 --method montecarlo --simulations 1000 --seed 12345");
+    expect_eq(static_cast<std::uint64_t>(first.exit_code), 0U, "first deterministic decision CLI run should succeed");
+    expect_eq(static_cast<std::uint64_t>(second.exit_code), 0U, "second deterministic decision CLI run should succeed");
+    expect_true(normalize_cli_output(first.output) == normalize_cli_output(second.output),
+                "decision CLI Monte Carlo output should be deterministic with a fixed seed");
+}
+
+void test_cli_analyze_command() {
+    expect_cli_success(
+        "poker.exe analyze As Ks --board Qh 7c 2s --opponents 1 --pot 100 --call 50 --stack 500 --method exact",
+        {"Hero: As Ks", "Board: Qh 7c 2s", "Opponents: 1", "Method: Exact", "Win:", "Pot before call:", "Call EV:", "Recommendation: CALL"});
+
+    expect_cli_success(
+        "poker.exe analyze 2c 3d --board Ah Kd Qs --opponents 1 --pot 5 --call 20 --stack 500 --method exact",
+        {"Recommendation: FOLD"});
+
+    expect_cli_success(
+        "poker.exe analyze As Ad --board Qh 7c 2s --opponents 1 --pot 100 --call 0 --stack 200 --method exact",
+        {"Recommendation: BET", "Suggested amount:", "Reason: Strong equity"});
+
+    expect_cli_success(
+        "poker.exe analyze 2c 3d --board Ah Kd Qs --opponents 1 --pot 5 --call 0 --stack 200 --method exact",
+        {"Recommendation: CHECK"});
+
+    const CliRunResult first = run_cli_command("poker.exe analyze As Ks --board Qh 7c 2s --opponents 2 --pot 100 --call 50 --method montecarlo --simulations 1000 --seed 12345");
+    const CliRunResult second = run_cli_command("poker.exe analyze As Ks --board Qh 7c 2s --opponents 2 --pot 100 --call 50 --method montecarlo --simulations 1000 --seed 12345");
+    expect_eq(static_cast<std::uint64_t>(first.exit_code), 0U, "first deterministic analyze CLI run should succeed");
+    expect_eq(static_cast<std::uint64_t>(second.exit_code), 0U, "second deterministic analyze CLI run should succeed");
+    expect_true(normalize_cli_output(first.output) == normalize_cli_output(second.output),
+                "analyze CLI Monte Carlo output should be deterministic with a fixed seed");
+}
+
+void test_cli_analyze_validation_failures() {
+    expect_cli_failure(
+        "poker.exe analyze As Ks --opponents 1 --pot 100",
+        {"--call is required"});
+
+    expect_cli_failure(
+        "poker.exe analyze As Ks --opponents 1 --call 50",
+        {"--pot is required"});
+
+    expect_cli_failure(
+        "poker.exe analyze As Ks --opponents 1 --pot 100 --call 50 --method bogus",
+        {"Invalid method"});
+}
+
+void test_exact_state_limit_helpers() {
+    expect_true(poker::detail::exact_equity_allowed(poker::detail::kMaxExactStates), "10,000,000 states should be allowed");
+    expect_true(!poker::detail::exact_equity_allowed(poker::detail::kMaxExactStates + 1U),
+                "10,000,001 states should be rejected");
+
+    const std::uint64_t below_limit_states = poker::theoretical_exact_states(make_hand("As", "Ks", {"Qh", "7c", "2s"}), 1U);
+    expect_true(below_limit_states < poker::detail::kMaxExactStates, "known below-limit case should stay under the safety limit");
+
+    expect_no_throw([&] {
+        (void)poker::calculate_equity(make_hand("As", "Ks", {"Qh", "7c", "2s"}), 1U, exact_options());
+    }, "below-limit exact equity should still execute");
+}
+
+void test_cli_exact_state_limit_selection() {
+    expect_cli_success(
+        "poker.exe equity As Ks --board Qh 7c 2s --opponents 1",
+        {"Method: Exact", "States:"});
+
+    expect_cli_success(
+        "poker.exe equity As Ks --opponents 5 --simulations 1000 --seed 12345",
+        {"Method: Monte Carlo", "Reason: Exact enumeration would require", "states (> 10,000,000 limit)"});
+
+    expect_cli_success(
+        "poker.exe decision As Ks --opponents 5 --pot 5 --call 3 --simulations 1000 --seed 12345",
+        {"Method: Monte Carlo", "Reason: Exact enumeration would require", "Recommendation:"});
+}
+
+void test_cli_exact_state_limit_rejection() {
+    expect_cli_failure(
+        "poker.exe equity As Ks --opponents 5 --method exact",
+        {"Exact equity was refused", "Use Monte Carlo instead"});
+
+    expect_cli_failure(
+        "poker.exe decision As Ks --opponents 5 --pot 5 --call 3 --method exact",
+        {"Exact equity was refused", "Use Monte Carlo instead"});
+}
+
+void test_game_session_helpers() {
+    expect_true(poker::parse_table_position("UTG") == poker::TablePosition::utg, "UTG should parse");
+    expect_true(poker::parse_table_position("btn") == poker::TablePosition::btn, "BTN should parse case-insensitively");
+
+    poker::GameSessionConfig config{};
+    config.hero_cards = {card("As"), card("Ks")};
+    config.opponents = 2U;
+    config.small_blind = 1.0;
+    config.big_blind = 2.0;
+    config.hero_position = 4U;
+    config.starting_stack = 100.0;
+
+    poker::GameSession session(config);
+    const poker::GameState state = session.current_game_state();
+    expect_eq(static_cast<std::uint64_t>(state.player_count), 3U, "session state should report hero plus opponents");
+    expect_eq(static_cast<std::uint64_t>(state.opponents.size()), 2U, "session state should expose random opponents");
+    expect_close(state.betting.hero_stack, 100.0, 1e-12, "starting stack should be reflected in the game state");
+}
+
+void test_game_session_reprompts_with_fresh_setup() {
+    std::istringstream input(
+        "As Ks\n"
+        "2\n"
+        "1\n"
+        "2\n"
+        "4\n"
+        "100\n"
+        "f\n"
+        "y\n"
+        "Ah Qh\n"
+        "1\n"
+        "0.25\n"
+        "0.5\n"
+        "4\n"
+        "250\n"
+        "f\n"
+        "n\n");
+    std::ostringstream output;
+
+    expect_no_throw([&] {
+        poker::run_game_session(input, output);
+    }, "play session should accept two independent hand setups");
+
+    const std::string transcript = output.str();
+    expect_true(transcript.find("Hero hole cards (e.g. As Kd): ") != std::string::npos, "first setup prompt should appear");
+    expect_true(transcript.find("Start another hand? (y/n): ") != std::string::npos, "repeat-hand prompt should appear");
+    expect_true(transcript.find("Hero cards: As Ks") != std::string::npos, "first hand should use first setup");
+    expect_true(transcript.find("Hero cards: Ah Qh") != std::string::npos, "second hand should use second setup");
+    expect_true(transcript.find("Opponents: 2") != std::string::npos, "first hand opponent count should appear");
+    expect_true(transcript.find("Opponents: 1") != std::string::npos, "second hand opponent count should appear");
+    expect_true(transcript.find("SB: 1") != std::string::npos, "first hand blinds should appear");
+    expect_true(transcript.find("SB: 0.25") != std::string::npos, "second hand blinds should appear");
+    expect_true(transcript.find("BB: 2") != std::string::npos, "first hand big blind should appear");
+    expect_true(transcript.find("BB: 0.5") != std::string::npos, "second hand big blind should appear");
+    expect_true(transcript.find("Position: 4") != std::string::npos, "first hand position should appear");
+    expect_true(transcript.find("Position: 4") != std::string::npos, "second hand position should appear");
+    expect_true(transcript.find("Starting stack: 100") != std::string::npos, "first hand stack should appear");
+    expect_true(transcript.find("Starting stack: 250") != std::string::npos, "second hand stack should appear");
 }
 
 [[maybe_unused]] poker::EquityOptions exact_options() {
@@ -1424,6 +1713,7 @@ int main() {
         !run_test("test_range_invalid_syntax", test_range_invalid_syntax) ||
         !run_test("test_betting_validation_and_legal_actions", test_betting_validation_and_legal_actions) ||
         !run_test("test_game_state_validation", test_game_state_validation) ||
+        !run_test("test_action_order_layer", test_action_order_layer) ||
         !run_test("test_game_state_equity_dispatch", test_game_state_equity_dispatch) ||
         !run_test("test_game_state_mixed_exact_equity", test_game_state_mixed_exact_equity) ||
         !run_test("test_game_state_mixed_monte_carlo", test_game_state_mixed_monte_carlo) ||
@@ -1444,6 +1734,14 @@ int main() {
         !run_test("test_cli_range_vs_range", test_cli_range_vs_range) ||
         !run_test("test_cli_validation_failures", test_cli_validation_failures) ||
         !run_test("test_cli_pot_odds_and_ev", test_cli_pot_odds_and_ev) ||
+        !run_test("test_cli_decision_command", test_cli_decision_command) ||
+        !run_test("test_cli_analyze_command", test_cli_analyze_command) ||
+        !run_test("test_cli_analyze_validation_failures", test_cli_analyze_validation_failures) ||
+        !run_test("test_game_session_helpers", test_game_session_helpers) ||
+        !run_test("test_game_session_reprompts_with_fresh_setup", test_game_session_reprompts_with_fresh_setup) ||
+        !run_test("test_exact_state_limit_helpers", test_exact_state_limit_helpers) ||
+        !run_test("test_cli_exact_state_limit_selection", test_cli_exact_state_limit_selection) ||
+        !run_test("test_cli_exact_state_limit_rejection", test_cli_exact_state_limit_rejection) ||
         !run_test("test_range_exact_river_equity", test_range_exact_river_equity) ||
         !run_test("test_range_exact_flop_and_turn_equity", test_range_exact_flop_and_turn_equity) ||
         !run_test("test_range_monte_carlo_cross_validation", test_range_monte_carlo_cross_validation) ||

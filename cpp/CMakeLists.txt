@@ -30,6 +30,7 @@ add_library(poker_core
     src/equity.cpp
     src/decision.cpp
     src/game_state.cpp
+    src/game_session.cpp
     src/evaluator.cpp
     src/ev.cpp
     src/hand.cpp

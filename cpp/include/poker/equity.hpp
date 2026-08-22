@@ -34,14 +34,22 @@ EquityResult calculate_equity(const HoldemHand& hero,
                               std::size_t opponents,
                               const EquityOptions& options = {});
 
+std::uint64_t theoretical_exact_states(const HoldemHand& hero, std::size_t opponents);
+
 EquityResult calculate_equity(const HoldemHand& hero,
                               const HandRange& villain_range,
                               const EquityOptions& options = {});
+
+std::uint64_t theoretical_exact_states(const HoldemHand& hero, const HandRange& villain_range);
 
 EquityResult calculate_equity(const HandRange& hero_range,
                               const HandRange& villain_range,
                               const std::vector<Card>& board,
                               const EquityOptions& options = {});
+
+std::uint64_t theoretical_exact_states(const HandRange& hero_range,
+                                       const HandRange& villain_range,
+                                       const std::vector<Card>& board);
 
 EquityResult simulate_equity(const HoldemHand& hero,
                              std::size_t opponents,

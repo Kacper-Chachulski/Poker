@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <optional>
+#include <string>
 #include <vector>
 
 #include "poker/betting.hpp"
@@ -21,6 +22,9 @@ struct DecisionResult {
     std::vector<ActionEvaluation> actions{};
     std::optional<BettingAction> best_action{};
     std::optional<double> best_ev{};
+    std::optional<double> suggested_amount{};
+    std::optional<std::string> rationale{};
+    bool heuristic_recommendation{false};
 };
 
 ActionEvaluation evaluate_action(const BettingState& betting, double equity, BettingAction action);

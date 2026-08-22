@@ -54,6 +54,9 @@ Not supported yet:
 
 Exact equity enumerates concrete legal hole-card combinations and remaining board runouts.
 Monte Carlo samples from the same state space using a seedable RNG.
+Exact enumeration is capped at 10,000,000 theoretical states; above that, the CLI automatically
+falls back to Monte Carlo unless the user explicitly requests exact, in which case the request is
+rejected with a clear error.
 
 `EquityResult` reports:
 
@@ -127,6 +130,8 @@ Supported commands:
 - `equity`
 - `pot-odds`
 - `ev`
+- `decision`
+- `analyze`
 
 Examples:
 
@@ -135,6 +140,8 @@ cpp\build\poker.exe equity As Ks --villain-range "QQ+, AJs+, KQs" --board Qh 7c 
 cpp\build\poker.exe equity --hero-range "QQ+, AKs" --villain-range "JJ+, AQs+" --board Qh 7c 2s --method montecarlo --simulations 1000000 --seed 12345
 cpp\build\poker.exe pot-odds --pot 100 --call 50
 cpp\build\poker.exe ev --pot 100 --call 50 --equity 0.40
+cpp\build\poker.exe decision Ah Ts --board 4d 4h 7h Ks --opponents 1 --pot 5 --call 3 --stack 200
+cpp\build\poker.exe analyze Ah Ts --board 4d 4h 7h Ks --opponents 1 --pot 5 --call 3 --stack 200 --method montecarlo --simulations 100000 --seed 12345
 ```
 
 Current equity CLI modes:
@@ -143,7 +150,29 @@ Current equity CLI modes:
 - specific hand vs range, using positional hero cards and `--villain-range`
 - range vs range, using `--hero-range` and `--villain-range`
 
+If `--method` is omitted, the CLI chooses exact when the theoretical state count is at or below
+10,000,000 and Monte Carlo when it is above that limit. When the fallback happens, the output
+includes a `Reason:` line explaining why exact was refused.
+
 Run `cpp\build\poker.exe equity --help` for the full syntax.
+
+The `decision` command combines equity, pot odds, EV, and the existing decision layer for a
+current hand spot using the random-opponent model when no explicit ranges are supplied. It prints
+the equity estimate, required equity, call/fold EV, and a recommendation.
+
+The `analyze` command combines the same equity and decision data with pot odds in one report. It
+prints the win/tie/loss split, equity, pot odds, call EV, fold EV, and the recommendation for the
+current spot.
+
+This is a heuristic v1 betting/raising strategy, not a GTO solver. Bet/raise recommendations use
+simplified equity and sizing rules and do not yet model opponent folding probabilities, ranges
+changing in response to bets, future betting streets, or stack-aware opponent strategy.
+
+Example:
+
+```powershell
+cpp\build\poker.exe decision Ah Ts --board 4d 4h 7h Ks --opponents 1 --pot 5 --call 3 --method montecarlo --simulations 100000 --seed 12345
+```
 
 ## Benchmarks
 

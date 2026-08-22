@@ -13,6 +13,8 @@
 
 namespace poker {
 
+std::uint64_t theoretical_exact_states(const GameState& state);
+
 namespace {
 
 constexpr std::size_t kMaxMixedKnownCards = 17U;
@@ -42,6 +44,24 @@ std::size_t board_count_for_street(Street street) {
 
     detail::throw_invalid("Invalid street");
     return 0U;
+}
+
+std::optional<std::size_t> next_eligible_seat(const std::vector<PlayerStatus>& seats,
+                                             std::size_t from_seat,
+                                             bool include_from) {
+    const std::size_t player_count = seats.size();
+    if (player_count == 0U) {
+        return std::nullopt;
+    }
+
+    for (std::size_t offset = include_from ? 0U : 1U; offset <= player_count; ++offset) {
+        const std::size_t seat = (from_seat + offset) % player_count;
+        if (seats[seat] == PlayerStatus::active) {
+            return seat;
+        }
+    }
+
+    return std::nullopt;
 }
 
 std::array<Card, detail::kDeckSize> make_full_deck() {
@@ -182,6 +202,57 @@ std::vector<const Opponent*> collect_flexible_opponents(const GameState& state) 
     }
 
     return flexible_opponents;
+}
+
+std::vector<HandCombo> legal_combos_for_opponent(const Opponent& opponent,
+                                                 const std::array<Card, detail::kDeckSize>& deck,
+                                                 std::size_t remaining,
+                                                 const std::array<Card, kMaxMixedKnownCards>& known_cards,
+                                                 std::size_t known_count);
+
+std::uint64_t count_mixed_exact_states(const HoldemHand& hero,
+                                      const std::vector<const Opponent*>& flexible_opponents,
+                                      std::size_t seat_index,
+                                      const std::array<Card, detail::kDeckSize>& deck,
+                                      std::size_t remaining,
+                                      const std::array<Card, kMaxMixedKnownCards>& known_cards,
+                                      std::size_t known_count) {
+    if (seat_index == flexible_opponents.size()) {
+        return detail::binomial(remaining, 5U - hero.board_count);
+    }
+
+    const Opponent& opponent = *flexible_opponents[seat_index];
+    const std::vector<HandCombo> candidates = legal_combos_for_opponent(opponent, deck, remaining, known_cards, known_count);
+    if (candidates.empty()) {
+        detail::throw_invalid("No legal opponent combinations remain after card removal");
+    }
+
+    std::uint64_t total_states = 0U;
+    for (const HandCombo& candidate : candidates) {
+        const std::array<Card, 2> cards = candidate.cards();
+        std::array<Card, detail::kDeckSize> next_deck = deck;
+        std::size_t next_remaining = remaining;
+        remove_card(next_deck, next_remaining, cards[0]);
+        remove_card(next_deck, next_remaining, cards[1]);
+
+        std::array<Card, kMaxMixedKnownCards> next_known_cards = known_cards;
+        std::size_t next_known_count = known_count;
+        append_combo_cards(candidate, next_known_cards, next_known_count);
+
+        total_states = detail::saturating_add_exact_states(total_states,
+                                                           count_mixed_exact_states(hero,
+                                                                                   flexible_opponents,
+                                                                                   seat_index + 1U,
+                                                                                   next_deck,
+                                                                                   next_remaining,
+                                                                                   next_known_cards,
+                                                                                   next_known_count));
+        if (total_states >= detail::kExactStatesOverLimit) {
+            return detail::kExactStatesOverLimit;
+        }
+    }
+
+    return total_states;
 }
 
 std::vector<HandCombo> legal_combos_for_opponent(const Opponent& opponent,
@@ -590,8 +661,11 @@ EquityResult solve_mixed_game_state(const GameState& state, const EquityOptions&
 
     switch (options.method) {
         case EquityMethod::exact: {
-            std::vector<std::array<Card, 2>> villains{};
-            villains.reserve(flexible_opponents.size());
+            const std::uint64_t theoretical_states = theoretical_exact_states(state);
+            if (!detail::exact_equity_allowed(theoretical_states)) {
+                detail::throw_exact_equity_limit(theoretical_states);
+            }
+
             const std::optional<EquityResult> result = solve_mixed_exact_recursive(state.hero,
                                                                                    flexible_opponents,
                                                                                    0U,
@@ -624,6 +698,114 @@ EquityResult solve_mixed_game_state(const GameState& state, const EquityOptions&
 }
 
 }  // namespace
+
+void ActionOrderState::reset(Street new_street) {
+    street = new_street;
+}
+
+void ActionOrderState::set_status(std::size_t seat, PlayerStatus new_status) {
+    if (seat >= seats.size()) {
+        detail::throw_invalid("Seat out of range");
+    }
+    seats[seat] = new_status;
+}
+
+PlayerStatus ActionOrderState::status(std::size_t seat) const {
+    if (seat >= seats.size()) {
+        detail::throw_invalid("Seat out of range");
+    }
+    return seats[seat];
+}
+
+bool ActionOrderState::is_active(std::size_t seat) const {
+    return status(seat) == PlayerStatus::active;
+}
+
+std::size_t ActionOrderState::active_player_count() const {
+    std::size_t count = 0U;
+    for (PlayerStatus seat_status : seats) {
+        if (seat_status == PlayerStatus::active) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+bool ActionOrderState::hand_over() const {
+    return active_player_count() <= 1U;
+}
+
+std::optional<std::size_t> ActionOrderState::first_to_act() const {
+    if (hand_over() || seats.empty()) {
+        return std::nullopt;
+    }
+
+    const std::size_t player_count = seats.size();
+    std::size_t start = 0U;
+    if (street == Street::preflop) {
+        if (player_count == 2U) {
+            start = button_seat;
+        } else {
+            start = (button_seat + 3U) % player_count;
+        }
+    } else {
+        start = (button_seat + 1U) % player_count;
+    }
+
+    return next_eligible_seat(seats, start, true);
+}
+
+std::optional<std::size_t> ActionOrderState::next_to_act(std::size_t from_seat) const {
+    if (hand_over() || seats.empty()) {
+        return std::nullopt;
+    }
+    if (from_seat >= seats.size()) {
+        detail::throw_invalid("Seat out of range");
+    }
+    return next_eligible_seat(seats, from_seat, false);
+}
+
+std::uint64_t theoretical_exact_states(const GameState& state) {
+    validate_game_state(state);
+
+    const std::size_t random_count = random_opponent_count(state);
+    const std::size_t known_count = known_opponent_count(state);
+
+    if (known_count == 0U) {
+        return detail::theoretical_exact_states(state.hero.board_count, random_count);
+    }
+
+    if (state.opponents.size() == 1U) {
+        const Opponent& opponent = state.opponents.front();
+        if (std::holds_alternative<HandCombo>(opponent)) {
+            return detail::theoretical_board_runout_states(state.hero.board_count);
+        }
+
+        if (const HandRange* range = std::get_if<HandRange>(&opponent)) {
+            return theoretical_exact_states(state.hero, *range);
+        }
+
+        return detail::theoretical_exact_states(state.hero.board_count, 1U);
+    }
+
+    std::size_t known_count_local = 0U;
+    const std::array<Card, kMaxMixedKnownCards> known_cards_local = collect_initial_known_cards(state, known_count_local);
+
+    std::array<Card, detail::kDeckSize> deck = make_full_deck();
+    std::size_t remaining = detail::kDeckSize;
+    for (std::size_t index = 0U; index < known_count_local; ++index) {
+        remove_card(deck, remaining, known_cards_local[index]);
+    }
+
+    const std::vector<const Opponent*> flexible_opponents = collect_flexible_opponents(state);
+    return count_mixed_exact_states(state.hero,
+                                    flexible_opponents,
+                                    0U,
+                                    deck,
+                                    remaining,
+                                    known_cards_local,
+                                    known_count_local);
+}
 
 std::size_t board_card_count(Street street) {
     return board_count_for_street(street);
@@ -674,6 +856,32 @@ void validate_game_state(const GameState& state) {
     }
 
     validate_known_cards(collect_known_cards(state));
+}
+
+void validate_action_order_state(const ActionOrderState& state) {
+    if (state.player_count < 2U) {
+        detail::throw_invalid("Player count must be at least 2");
+    }
+
+    if (state.player_count > 6U) {
+        detail::throw_invalid("Player count cannot exceed 6");
+    }
+
+    if (state.seats.size() != state.player_count) {
+        detail::throw_invalid("Seat count must match player count");
+    }
+
+    if (state.button_seat >= state.player_count) {
+        detail::throw_invalid("Button seat must be in range");
+    }
+
+    if (state.hand_over()) {
+        return;
+    }
+
+    if (!state.first_to_act().has_value()) {
+        detail::throw_invalid("A non-terminal hand must have a first actor");
+    }
 }
 
 EquityResult calculate_equity(const GameState& state, const EquityOptions& options) {

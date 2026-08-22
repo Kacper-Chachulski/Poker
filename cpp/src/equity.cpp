@@ -117,6 +117,19 @@ struct RangeMatchup {
     std::vector<HandCombo> villains;
 };
 
+std::uint64_t count_range_vs_range_states(const std::vector<RangeMatchup>& matchups, std::size_t board_count) {
+    const std::uint64_t board_states = detail::theoretical_board_runout_states(board_count);
+    std::uint64_t pair_states = 0U;
+    for (const RangeMatchup& matchup : matchups) {
+        pair_states = detail::saturating_add_exact_states(pair_states, static_cast<std::uint64_t>(matchup.villains.size()));
+        if (pair_states >= detail::kExactStatesOverLimit) {
+            return detail::kExactStatesOverLimit;
+        }
+    }
+
+    return detail::saturating_multiply_exact_states(pair_states, board_states);
+}
+
 std::vector<RangeMatchup> build_range_matchups(const HandRange& hero_range,
                                                const HandRange& villain_range,
                                                const std::vector<Card>& board) {
@@ -223,6 +236,10 @@ EquityResult solve_range_vs_range_exact_equity(const HandRange& hero_range,
                                                const HandRange& villain_range,
                                                const std::vector<Card>& board) {
     const std::vector<RangeMatchup> matchups = build_range_matchups(hero_range, villain_range, board);
+    const std::uint64_t theoretical_states = count_range_vs_range_states(matchups, board.size());
+    if (!detail::exact_equity_allowed(theoretical_states)) {
+        detail::throw_exact_equity_limit(theoretical_states);
+    }
 
     std::array<Card, detail::kDeckSize> base_deck = make_full_deck();
     std::size_t base_count = detail::kDeckSize;
@@ -500,6 +517,12 @@ EquityResult solve_range_exact_equity(const HoldemHand& hero, const HandRange& v
     detail::validate_hand(hero);
 
     const std::vector<HandCombo> legal_combos = filter_legal_villain_combos(hero, villain_range);
+    const std::uint64_t theoretical_states = detail::saturating_multiply_exact_states(
+        static_cast<std::uint64_t>(legal_combos.size()),
+        detail::theoretical_board_runout_states(hero.board_count));
+    if (!detail::exact_equity_allowed(theoretical_states)) {
+        detail::throw_exact_equity_limit(theoretical_states);
+    }
 
     std::array<Card, detail::kDeckSize> base_deck = make_full_deck();
     std::size_t base_count = detail::kDeckSize;
@@ -643,6 +666,32 @@ EquityResult calculate_equity(const HoldemHand& hero, std::size_t opponents, con
 
     detail::throw_invalid("Unknown equity calculation method");
     return {};
+}
+
+std::uint64_t theoretical_exact_states(const HoldemHand& hero, std::size_t opponents) {
+    detail::validate_equity_request(hero, opponents);
+    return detail::theoretical_exact_states(hero.board_count, opponents);
+}
+
+std::uint64_t theoretical_exact_states(const HoldemHand& hero, const HandRange& villain_range) {
+    detail::validate_hand(hero);
+    const std::vector<HandCombo> legal_combos = filter_legal_villain_combos(hero, villain_range);
+    return static_cast<std::uint64_t>(legal_combos.size()) * detail::theoretical_board_runout_states(hero.board_count);
+}
+
+std::uint64_t theoretical_exact_states(const HandRange& hero_range,
+                                       const HandRange& villain_range,
+                                       const std::vector<Card>& board) {
+    if (hero_range.empty()) {
+        detail::throw_invalid("Hero range must not be empty");
+    }
+
+    if (villain_range.empty()) {
+        detail::throw_invalid("Villain range must not be empty");
+    }
+
+    const std::vector<RangeMatchup> matchups = build_range_matchups(hero_range, villain_range, board);
+    return count_range_vs_range_states(matchups, board.size());
 }
 
 EquityResult calculate_equity(const HoldemHand& hero,

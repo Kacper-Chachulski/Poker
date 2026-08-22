@@ -173,40 +173,15 @@ void enumerate_board(std::array<Card, detail::kDeckSize>& deck,
     }
 }
 
-std::uint64_t binomial(std::uint64_t n, std::uint64_t k) {
-    if (k > n) {
-        return 0U;
-    }
-    if (k > n - k) {
-        k = n - k;
-    }
-
-    std::uint64_t result = 1U;
-    for (std::uint64_t index = 1U; index <= k; ++index) {
-        result = (result * (n - k + index)) / index;
-    }
-    return result;
-}
-
-std::uint64_t theoretical_states(std::size_t hero_board_count, std::size_t opponents) {
-    const std::size_t missing_board = 5U - hero_board_count;
-    std::uint64_t remaining = 52U - 2U - hero_board_count;
-    const std::uint64_t board_states = binomial(remaining, missing_board);
-    remaining -= missing_board;
-
-    std::uint64_t opponent_states = 1U;
-    for (std::size_t opponent = 0; opponent < opponents; ++opponent) {
-        opponent_states *= binomial(remaining, 2U);
-        remaining -= 2U;
-    }
-
-    return board_states * opponent_states;
-}
-
 }  // namespace
 
 EquityResult solve_exact_equity(const HoldemHand& hero, std::size_t opponents) {
     detail::validate_equity_request(hero, opponents);
+
+    const std::uint64_t theoretical_states = detail::theoretical_exact_states(hero.board_count, opponents);
+    if (!detail::exact_equity_allowed(theoretical_states)) {
+        detail::throw_exact_equity_limit(theoretical_states);
+    }
 
     std::array<Card, detail::kDeckSize> deck = make_full_deck();
     std::size_t deck_count = detail::kDeckSize;
@@ -234,7 +209,7 @@ EquityResult solve_exact_equity(const HoldemHand& hero, std::size_t opponents) {
                     counts,
                     hero);
 
-    const std::uint64_t expected_states = theoretical_states(hero.board_count, opponents);
+    const std::uint64_t expected_states = theoretical_states;
     if (counts.states != expected_states) {
         throw std::runtime_error("Exact solver state count mismatch");
     }
