@@ -42,8 +42,8 @@ std::string recommendation_name(BettingAction action) {
 TablePosition parse_table_position(const std::string& text) {
     const std::string upper = to_upper_copy(text);
     if (upper == "UTG") return TablePosition::utg;
-    if (upper == "MP") return TablePosition::mp;
-    if (upper == "CO") return TablePosition::co;
+    if (upper == "MP") return TablePosition::utg_plus_1;
+    if (upper == "CO") return TablePosition::utg_plus_2;
     if (upper == "BTN") return TablePosition::btn;
     if (upper == "SB") return TablePosition::sb;
     if (upper == "BB") return TablePosition::bb;
@@ -54,81 +54,123 @@ GameSession::GameSession(GameSessionConfig config) : config_(config) {
     reset_hand();
 }
 
-std::size_t GameSession::total_players() const { return 6U; }
+std::size_t GameSession::total_players() const { return config_.opponents + 1U; }
 
-std::size_t GameSession::hero_seat() const {
-    return hero_seat_;
+TablePosition GameSession::hero_position() const { return hero_position_; }
+
+TablePosition GameSession::button_position() const { return TablePosition::btn; }
+
+TablePosition GameSession::small_blind_position() const { return TablePosition::sb; }
+
+TablePosition GameSession::big_blind_position() const { return TablePosition::bb; }
+
+// Helper: find index in player_positions_
+static std::size_t index_of_position(const std::vector<TablePosition>& positions, TablePosition pos) {
+    for (std::size_t i = 0; i < positions.size(); ++i) {
+        if (positions[i] == pos) return i;
+    }
+    detail::throw_invalid("Position not found");
+    return 0U;
 }
-
-std::size_t GameSession::button_seat() const {
-    return (hero_seat_ + 1U) % total_players();
-}
-
-std::size_t GameSession::small_blind_seat() const {
-    return (button_seat() + 1U) % total_players();
-}
-
-std::size_t GameSession::big_blind_seat() const { return (small_blind_seat() + 1U) % total_players(); }
 
 void GameSession::reset_hand() {
-    if (config_.hero_position < 1U || config_.hero_position > total_players()) {
-        throw std::invalid_argument("Hero position must be between 1 and 6");
+    const std::size_t players = total_players();
+    if (config_.hero_position < 1U || config_.hero_position > players) {
+        throw std::invalid_argument("Hero position must be between 1 and " + std::to_string(players));
     }
-    hero_seat_ = config_.hero_position - 1U;
-    seats_.assign(6U, SessionSeatState{});
-    acted_.assign(6U, false);
-    for (std::size_t seat = 0U; seat < seats_.size(); ++seat) {
-        seats_[seat].stack = config_.starting_stack;
-        seats_[seat].active = false;
+
+    // Build canonical player positions clockwise starting from BTN
+    player_positions_.clear();
+    if (players == 2U) {
+        player_positions_.push_back(TablePosition::btn);
+        player_positions_.push_back(TablePosition::bb);
+    } else {
+        const std::vector<TablePosition> base = {TablePosition::btn,
+                                                 TablePosition::sb,
+                                                 TablePosition::bb,
+                                                 TablePosition::utg,
+                                                 TablePosition::utg_plus_1,
+                                                 TablePosition::utg_plus_2};
+        for (std::size_t i = 0; i < players; ++i) player_positions_.push_back(base[i]);
     }
-    seats_[hero_seat()].hero = true;
-    seats_[hero_seat()].active = true;
+
+    // Prepare player state aligned to player_positions_
+    players_.assign(players, SessionPlayerState{});
+    acted_.assign(players, false);
+    for (std::size_t i = 0; i < players; ++i) {
+        players_[i].stack = config_.starting_stack;
+        players_[i].active = false;
+    }
+
+    // Initialize action_order_ (uses numeric indices aligned with player_positions_)
+    action_order_.player_count = players;
+    action_order_.button_seat = 0; // BTN is index 0 in player_positions_
+    street_ = Street::preflop;
+    action_order_.street = street_;
+
+    // Determine first-to-act preflop using existing ActionOrderState logic (numeric indices)
+    {
+        ActionOrderState tmp = action_order_;
+        tmp.seats.assign(players, PlayerStatus::folded);
+        // No active seats yet; we'll set active below after mapping hero and opponents
+        std::optional<std::size_t> first_idx = tmp.first_to_act();
+        // first_idx may be nullopt if hand over; we'll compute preflop order after active set
+    }
+
+    // Map relative preflop position -> absolute TablePosition
+    // To compute mapping we need the preflop action order; temporarily assume all positions active for ordering
+    std::vector<std::size_t> full_order_idx;
+    full_order_idx.reserve(players);
+    // find start index for preflop: if players==2, start=button (0) else start=(button+3)%players
+    std::size_t start_idx = (players == 2U) ? 0U : (0U + 3U) % players;
+    for (std::size_t offset = 0; offset < players; ++offset) full_order_idx.push_back((start_idx + offset) % players);
+
+    const std::size_t hero_order_index = (config_.hero_position - 1U) % players;
+    const std::size_t hero_idx = full_order_idx[hero_order_index];
+    hero_position_ = player_positions_[hero_idx];
+
+    // Mark hero and assign opponents clockwise from hero_idx
+    players_[hero_idx].hero = true;
+    players_[hero_idx].active = true;
     std::size_t assigned = 0U;
     for (std::size_t offset = 1U; assigned < config_.opponents; ++offset) {
-        const std::size_t seat = (hero_seat_ + offset) % 6U;
-        if (seat == hero_seat_) {
-            continue;
-        }
-        if (!seats_[seat].hero && !seats_[seat].active) {
-            seats_[seat].active = true;
+        const std::size_t idx = (hero_idx + offset) % players;
+        if (!players_[idx].hero && !players_[idx].active) {
+            players_[idx].active = true;
             ++assigned;
         }
     }
+
+    // Initialize action_order_.seats from players_.active
+    action_order_.seats.assign(players, PlayerStatus::folded);
+    for (std::size_t i = 0; i < players; ++i) {
+        action_order_.seats[i] = players_[i].active ? PlayerStatus::active : PlayerStatus::folded;
+    }
+
+    // acted_ initial state
+    for (std::size_t i = 0; i < players; ++i) acted_[i] = !players_[i].active;
+
     board_.clear();
-    street_ = Street::preflop;
     pot_ = 0.0;
     current_bet_ = 0.0;
     history_.clear();
-    action_order_.player_count = total_players();
-    action_order_.button_seat = button_seat();
-    action_order_.street = street_;
-    action_order_.seats.assign(total_players(), PlayerStatus::folded);
-    for (std::size_t seat = 0U; seat < seats_.size(); ++seat) {
-        action_order_.seats[seat] = seats_[seat].active ? PlayerStatus::active : PlayerStatus::folded;
-    }
-
-    seat_order_.clear();
-    seat_order_.reserve(total_players());
-    for (std::size_t offset = 0U; offset < total_players(); ++offset) {
-        seat_order_.push_back((hero_seat_ + offset) % total_players());
-    }
+    position_order_ = player_positions_; // copy for clarity
 }
 
 void GameSession::reset_street(Street street) {
     street_ = street;
     current_bet_ = 0.0;
     action_order_.reset(street);
-    for (std::size_t seat = 0U; seat < seats_.size(); ++seat) {
-        if (seats_[seat].active) {
-            seats_[seat].contribution = 0.0;
-        }
-        acted_[seat] = !seats_[seat].active;
+    for (std::size_t i = 0U; i < players_.size(); ++i) {
+        if (players_[i].active) players_[i].contribution = 0.0;
+        acted_[i] = !players_[i].active;
     }
 }
 
-std::string GameSession::seat_label(std::size_t seat) const {
-    if (seat == hero_seat()) return "Hero";
-    return std::string("Player ") + std::to_string(seat + 1U);
+std::string GameSession::position_label(TablePosition pos) const {
+    const std::size_t idx = index_of_position(player_positions_, pos);
+    if (player_positions_[idx] == hero_position_) return "Hero";
+    return std::string("Player ") + std::to_string(idx + 1U);
 }
 
 std::string GameSession::street_label() const {
@@ -141,121 +183,125 @@ std::string GameSession::street_label() const {
     return "PREFLOP";
 }
 
-void GameSession::apply_posted_amount(std::size_t seat, double amount) {
-    seats_[seat].stack -= amount;
-    seats_[seat].contribution += amount;
+void GameSession::apply_posted_amount(TablePosition pos, double amount) {
+    const std::size_t idx = index_of_position(player_positions_, pos);
+    players_[idx].stack -= amount;
+    players_[idx].contribution += amount;
     pot_ += amount;
-    current_bet_ = std::max(current_bet_, seats_[seat].contribution);
+    current_bet_ = std::max(current_bet_, players_[idx].contribution);
 }
 
-void GameSession::apply_fold(std::size_t seat) { seats_[seat].active = false; }
+void GameSession::apply_fold(TablePosition pos) {
+    const std::size_t idx = index_of_position(player_positions_, pos);
+    players_[idx].active = false;
+}
 
-void GameSession::mark_all_active_to_act(std::size_t start_seat) {
+void GameSession::mark_all_active_to_act(TablePosition start_pos) {
     std::fill(acted_.begin(), acted_.end(), true);
-    std::size_t seat = start_seat;
-    for (std::size_t count = 0U; count < seats_.size(); ++count) {
-        if (seats_[seat].active) {
-            acted_[seat] = false;
-        }
-        seat = next_active_seat(seat);
+    std::size_t start = index_of_position(player_positions_, start_pos);
+    std::size_t seat = start;
+    for (std::size_t count = 0U; count < players_.size(); ++count) {
+        if (players_[seat].active) acted_[seat] = false;
+        const std::optional<std::size_t> next = action_order_.next_to_act(seat);
+        seat = next.value_or(seat + 1U >= players_.size() ? 0U : seat + 1U);
     }
 }
 
-void GameSession::apply_check_or_call(std::size_t seat) {
-    const double to_call = std::max(0.0, current_bet_ - seats_[seat].contribution);
-    apply_posted_amount(seat, std::min(to_call, seats_[seat].stack));
+void GameSession::apply_check_or_call(TablePosition pos) {
+    const std::size_t idx = index_of_position(player_positions_, pos);
+    const double to_call = std::max(0.0, current_bet_ - players_[idx].contribution);
+    apply_posted_amount(pos, std::min(to_call, players_[idx].stack));
 }
 
-void GameSession::apply_raise_to(std::size_t seat, double amount) {
-    if (amount > seats_[seat].stack + seats_[seat].contribution) {
+void GameSession::apply_raise_to(TablePosition pos, double amount) {
+    const std::size_t idx = index_of_position(player_positions_, pos);
+    if (amount > players_[idx].stack + players_[idx].contribution) {
         throw std::invalid_argument("Raise exceeds remaining stack");
     }
-    const double needed = amount - seats_[seat].contribution;
+    const double needed = amount - players_[idx].contribution;
     if (needed < 0.0) {
         throw std::invalid_argument("Raise amount must not be below current contribution");
     }
-    apply_posted_amount(seat, needed);
-    current_bet_ = std::max(current_bet_, seats_[seat].contribution);
+    apply_posted_amount(pos, needed);
+    current_bet_ = std::max(current_bet_, players_[idx].contribution);
 }
 
-BettingState GameSession::build_betting_state_for_seat(std::size_t seat) const {
+BettingState GameSession::build_betting_state_for_position(TablePosition pos) const {
+    const std::size_t idx = index_of_position(player_positions_, pos);
     BettingState betting{};
     betting.current_pot = pot_;
-    betting.call_amount = std::max(0.0, current_bet_ - seats_[seat].contribution);
-    betting.hero_stack = seats_[seat].stack;
+    betting.call_amount = std::max(0.0, current_bet_ - players_[idx].contribution);
+    betting.hero_stack = players_[idx].stack;
     betting.check_allowed = betting.call_amount == 0.0;
     betting.minimum_raise_amount = betting.call_amount == 0.0 ? 1.0 : std::max(1.0, betting.call_amount);
     return betting;
 }
 
-std::vector<std::size_t> GameSession::active_seats() const {
-    std::vector<std::size_t> seats;
-    for (std::size_t seat = 0U; seat < seats_.size(); ++seat) {
-        if (seats_[seat].active) {
-            seats.push_back(seat);
-        }
+
+std::vector<TablePosition> GameSession::active_positions() const {
+    std::vector<TablePosition> positions;
+    for (std::size_t i = 0U; i < players_.size(); ++i) {
+        if (players_[i].active) positions.push_back(player_positions_[i]);
     }
-    return seats;
+    return positions;
 }
 
-std::vector<std::size_t> GameSession::ordered_seats_from(std::size_t seat) const {
-    std::vector<std::size_t> ordered;
+std::vector<TablePosition> GameSession::ordered_positions_from(TablePosition pos) const {
+    const std::size_t start = index_of_position(player_positions_, pos);
+    std::vector<TablePosition> ordered;
     ordered.reserve(total_players());
-    for (std::size_t offset = 0U; offset < total_players(); ++offset) {
-        ordered.push_back((seat + offset) % total_players());
-    }
+    for (std::size_t offset = 0U; offset < total_players(); ++offset) ordered.push_back(player_positions_[(start + offset) % total_players()]);
     return ordered;
 }
 
 std::size_t GameSession::active_opponent_count() const {
     std::size_t count = 0U;
-    for (std::size_t seat = 0U; seat < seats_.size(); ++seat) {
-        if (seat != hero_seat() && seats_[seat].active) {
-            ++count;
-        }
+    const std::size_t hero_idx = index_of_position(player_positions_, hero_position_);
+    for (std::size_t i = 0U; i < players_.size(); ++i) {
+        if (i != hero_idx && players_[i].active) ++count;
     }
     return count;
 }
 
-std::size_t GameSession::next_active_seat(std::size_t seat) const {
-    const std::optional<std::size_t> next = action_order_.next_to_act(seat);
-    return next.value_or(seat);
+TablePosition GameSession::next_active_position(TablePosition pos) const {
+    const std::size_t idx = index_of_position(player_positions_, pos);
+    const std::optional<std::size_t> next = action_order_.next_to_act(idx);
+    const std::size_t next_idx = next.value_or(idx);
+    return player_positions_[next_idx];
 }
 
-std::size_t GameSession::action_start_seat(Street street) const {
+TablePosition GameSession::action_start_position(Street street) const {
     ActionOrderState order = action_order_;
     order.street = street;
     const std::optional<std::size_t> start = order.first_to_act();
-    return start.value_or(button_seat());
+    const std::size_t idx = start.value_or(static_cast<std::size_t>(action_order_.button_seat));
+    return player_positions_[idx];
 }
 
-bool GameSession::betting_round_complete(std::size_t start_seat, std::size_t current_seat) const {
-    for (std::size_t seat = 0U; seat < seats_.size(); ++seat) {
-        if (seats_[seat].active && seat != current_seat && seats_[seat].contribution != current_bet_) {
-            return false;
-        }
+bool GameSession::betting_round_complete(TablePosition start_pos, TablePosition current_pos) const {
+    const std::size_t start = index_of_position(player_positions_, start_pos);
+    const std::size_t current = index_of_position(player_positions_, current_pos);
+    for (std::size_t i = 0U; i < players_.size(); ++i) {
+        if (players_[i].active && i != current && players_[i].contribution != current_bet_) return false;
     }
-    return current_seat == start_seat || seats_[start_seat].contribution == current_bet_;
+    return current == start || players_[start].contribution == current_bet_;
 }
 
 bool GameSession::betting_round_complete() const {
-    for (std::size_t seat = 0U; seat < seats_.size(); ++seat) {
-        if (!seats_[seat].active) {
-            continue;
-        }
-        if (seats_[seat].contribution != current_bet_ || !acted_[seat]) {
-            return false;
-        }
+    for (std::size_t i = 0U; i < players_.size(); ++i) {
+        if (!players_[i].active) continue;
+        if (players_[i].contribution != current_bet_ || !acted_[i]) return false;
     }
     return true;
 }
 
 bool GameSession::hand_over() const {
-    return active_opponent_count() == 0U || seats_[hero_seat()].active == false || action_order_.hand_over();
+    const std::size_t hero_idx = index_of_position(player_positions_, hero_position_);
+    return active_opponent_count() == 0U || players_[hero_idx].active == false || action_order_.hand_over();
 }
 
 void GameSession::print_status_line(std::ostream& output) const {
-    const BettingState betting = build_betting_state_for_seat(hero_seat());
+    const BettingState betting = build_betting_state_for_position(hero_position_);
     HoldemHand hero{};
     hero.hole[0] = config_.hero_cards[0];
     hero.hole[1] = config_.hero_cards[1];
@@ -294,24 +340,21 @@ void GameSession::print_status_line(std::ostream& output) const {
     }
 }
 
-void GameSession::prompt_and_apply_action(std::istream& input, std::ostream& output, std::size_t seat) {
-    const BettingState betting = build_betting_state_for_seat(seat);
-    if (seat == hero_seat()) {
+void GameSession::prompt_and_apply_action(std::istream& input, std::ostream& output, TablePosition pos) {
+    const BettingState betting = build_betting_state_for_position(pos);
+    const std::size_t idx = index_of_position(player_positions_, pos);
+    if (player_positions_[idx] == hero_position_) {
         HoldemHand hero{};
         hero.hole[0] = config_.hero_cards[0];
         hero.hole[1] = config_.hero_cards[1];
         hero.board_count = static_cast<std::uint8_t>(board_.size());
-        for (std::size_t index = 0U; index < board_.size(); ++index) {
-            hero.board[index] = board_[index];
-        }
+        for (std::size_t index = 0U; index < board_.size(); ++index) hero.board[index] = board_[index];
 
         EquityOptions equity_options = config_.equity_options;
         const std::uint64_t theoretical_states = theoretical_exact_states(hero, active_opponent_count());
         if (!detail::exact_equity_allowed(theoretical_states)) {
             equity_options.method = EquityMethod::monte_carlo;
-            if (equity_options.simulations == 0U) {
-                equity_options.simulations = 1000U;
-            }
+            if (equity_options.simulations == 0U) equity_options.simulations = 1000U;
         }
 
         const EquityResult equity = calculate_equity(hero, active_opponent_count(), equity_options);
@@ -325,54 +368,46 @@ void GameSession::prompt_and_apply_action(std::istream& input, std::ostream& out
         }
         if (decision.best_action.has_value()) {
             output << "RECOMMENDATION: " << recommendation_name(*decision.best_action);
-            if (decision.suggested_amount.has_value()) {
-                output << " TO " << *decision.suggested_amount;
-            }
+            if (decision.suggested_amount.has_value()) output << " TO " << *decision.suggested_amount;
             output << "\n";
         }
         output << "Hero action [c/f/r <amount>]: ";
     } else {
-        output << seat_label(seat) << " action [c/f/r <amount>]: ";
+        output << position_label(pos) << " action [c/f/r <amount>]: ";
     }
 
     std::string command;
     std::getline(input, command);
-    if (command.empty()) {
-        throw std::invalid_argument("Action is required");
-    }
+    if (command.empty()) throw std::invalid_argument("Action is required");
 
     std::istringstream stream(command);
     std::string verb;
     stream >> verb;
     if (verb == "f") {
-        apply_fold(seat);
-        history_.push_back({seat, SessionActionType::fold, 0.0});
+        apply_fold(pos);
+        history_.push_back({pos, SessionActionType::fold, 0.0});
         return;
     }
 
     if (verb == "c") {
-        const double to_call = std::max(0.0, current_bet_ - seats_[seat].contribution);
+        const double to_call = std::max(0.0, current_bet_ - players_[idx].contribution);
         if (to_call == 0.0) {
-            history_.push_back({seat, SessionActionType::check, 0.0});
+            history_.push_back({pos, SessionActionType::check, 0.0});
         } else {
-            apply_check_or_call(seat);
-            history_.push_back({seat, SessionActionType::call, to_call});
+            apply_check_or_call(pos);
+            history_.push_back({pos, SessionActionType::call, to_call});
         }
         return;
     }
 
     if (verb == "r") {
         double amount = 0.0;
-        if (!(stream >> amount)) {
-            throw std::invalid_argument("r requires an amount");
-        }
-        apply_raise_to(seat, amount);
+        if (!(stream >> amount)) throw std::invalid_argument("r requires an amount");
+        apply_raise_to(pos, amount);
         for (std::size_t other = 0U; other < acted_.size(); ++other) {
-            if (seats_[other].active && other != seat) {
-                acted_[other] = false;
-            }
+            if (players_[other].active && other != idx) acted_[other] = false;
         }
-        history_.push_back({seat, current_bet_ == amount ? SessionActionType::bet : SessionActionType::raise, amount});
+        history_.push_back({pos, current_bet_ == amount ? SessionActionType::bet : SessionActionType::raise, amount});
         return;
     }
 
@@ -389,13 +424,14 @@ GameState GameSession::current_game_state() const {
         state.hero.board[index] = board_[index];
     }
     state.betting.current_pot = pot_;
-    state.betting.call_amount = std::max(0.0, current_bet_ - seats_[hero_seat()].contribution);
-    state.betting.hero_stack = seats_[hero_seat()].stack;
+    const std::size_t hero_idx = index_of_position(player_positions_, hero_position_);
+    state.betting.call_amount = std::max(0.0, current_bet_ - players_[hero_idx].contribution);
+    state.betting.hero_stack = players_[hero_idx].stack;
     state.betting.check_allowed = state.betting.call_amount == 0.0;
     state.betting.minimum_raise_amount = 1.0;
     state.player_count = active_opponent_count() + 1U;
-    for (std::size_t seat = 0U; seat < seats_.size(); ++seat) {
-        if (seat == hero_seat() || !seats_[seat].active) continue;
+    for (std::size_t i = 0U; i < players_.size(); ++i) {
+        if (i == hero_idx || !players_[i].active) continue;
         state.opponents.emplace_back(RandomOpponent{});
     }
     return state;
@@ -403,8 +439,8 @@ GameState GameSession::current_game_state() const {
 
 void GameSession::post_blinds(std::ostream& output) {
     if (total_players() < 2U) return;
-    apply_posted_amount(small_blind_seat(), config_.small_blind);
-    apply_posted_amount(big_blind_seat(), config_.big_blind);
+    apply_posted_amount(small_blind_position(), config_.small_blind);
+    apply_posted_amount(big_blind_position(), config_.big_blind);
     output << "Blinds posted.\n";
 }
 
@@ -440,35 +476,29 @@ void GameSession::reveal_next_board(std::istream& input, std::ostream& output) {
 }
 
 void GameSession::run_street(std::istream& input, std::ostream& output) {
-    const std::size_t start_seat = action_start_seat(street_);
-    mark_all_active_to_act(start_seat);
-    (void)run_betting_round(input, output, start_seat);
+    const TablePosition start = action_start_position(street_);
+    mark_all_active_to_act(start);
+    (void)run_betting_round(input, output, start);
 }
 
-bool GameSession::run_betting_round(std::istream& input, std::ostream& output, std::size_t start_seat) {
-    if (hand_over()) {
-        return true;
-    }
-    std::size_t current = start_seat;
+bool GameSession::run_betting_round(std::istream& input, std::ostream& output, TablePosition start_pos) {
+    if (hand_over()) return true;
+    std::size_t current = index_of_position(player_positions_, start_pos);
+    const std::size_t start_idx = current;
     while (true) {
-        if (!seats_[current].active) {
+        if (!players_[current].active) {
             acted_[current] = true;
         } else if (!acted_[current]) {
-            prompt_and_apply_action(input, output, current);
+            prompt_and_apply_action(input, output, player_positions_[current]);
             acted_[current] = true;
-            action_order_.seats[current] = seats_[current].active ? PlayerStatus::active : PlayerStatus::folded;
-            if (hand_over()) {
-                return true;
-            }
-            if (betting_round_complete()) {
-                return false;
-            }
+            action_order_.seats[current] = players_[current].active ? PlayerStatus::active : PlayerStatus::folded;
+            if (hand_over()) return true;
+            if (betting_round_complete()) return false;
         }
 
-        current = next_active_seat(current);
-        if (current == start_seat && betting_round_complete()) {
-            return false;
-        }
+        const std::optional<std::size_t> next = action_order_.next_to_act(current);
+        current = next.value_or(current);
+        if (current == start_idx && betting_round_complete()) return false;
     }
 }
 
@@ -484,8 +514,9 @@ void GameSession::run(std::istream& input, std::ostream& output) {
 
     post_blinds(output);
     output << "=== PREFLOP ===\n";
-    output << "Pot: " << pot_ << " | To call: " << std::max(0.0, current_bet_ - seats_[hero_seat()].contribution) << "\n";
-    if (run_betting_round(input, output, action_start_seat(Street::preflop))) {
+    const std::size_t hero_idx = index_of_position(player_positions_, hero_position_);
+    output << "Pot: " << pot_ << " | To call: " << std::max(0.0, current_bet_ - players_[hero_idx].contribution) << "\n";
+    if (run_betting_round(input, output, action_start_position(Street::preflop))) {
         output << "Hero folded. Hand over.\n";
         return;
     }
@@ -500,7 +531,7 @@ void GameSession::run(std::istream& input, std::ostream& output) {
     reset_street(Street::flop);
     output << "=== FLOP BETTING ===\n";
     output << "Pot: " << pot_ << " | To call: 0\n";
-    if (run_betting_round(input, output, action_start_seat(Street::flop))) {
+    if (run_betting_round(input, output, action_start_position(Street::flop))) {
         output << "Hero folded. Hand over.\n";
         return;
     }
@@ -515,7 +546,7 @@ void GameSession::run(std::istream& input, std::ostream& output) {
     reset_street(Street::turn);
     output << "=== TURN BETTING ===\n";
     output << "Pot: " << pot_ << " | To call: 0\n";
-    if (run_betting_round(input, output, action_start_seat(Street::turn))) {
+    if (run_betting_round(input, output, action_start_position(Street::turn))) {
         output << "Hero folded. Hand over.\n";
         return;
     }
@@ -530,7 +561,7 @@ void GameSession::run(std::istream& input, std::ostream& output) {
     reset_street(Street::river);
     output << "=== RIVER BETTING ===\n";
     output << "Pot: " << pot_ << " | To call: 0\n";
-    if (run_betting_round(input, output, action_start_seat(Street::river))) {
+    if (run_betting_round(input, output, action_start_position(Street::river))) {
         output << "Hero folded. Hand over.\n";
         return;
     }
